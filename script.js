@@ -214,11 +214,12 @@ function adminInitTokenClient(){
         .then(r=>r.json()).then(p=>{
           adminConnectedEmail = p.email;
           if(OWNER_GMAIL && !OWNER_GMAIL.includes('PASTE') && p.email.toLowerCase()!==OWNER_GMAIL.toLowerCase()){
-            alert('This Google account is not authorised as the Platform Admin.');
+            alert(`This Google account is not authorised as the Platform Admin.\n\nYou signed in as: ${p.email}\nExpected admin account: ${OWNER_GMAIL}\n\nPlease try again and choose the correct Google account.`);
             adminAccessToken=null; adminConnectedEmail=null; return;
           }
           SESSION = {role:'superadmin'};
           sessionStorage.setItem('bfhs_session', JSON.stringify(SESSION));
+          alert(`Signed in as Platform Admin (${p.email}).`);
           if(registryConfigured()) adminLoadRegistry().then(render); else render();
         });
     }
@@ -228,7 +229,7 @@ function adminConnect(){
   if(!driveConfigured()){ alert("Google Drive isn't set up yet — add a Google Client ID & API key first (see Cloud Sync instructions)."); return; }
   adminInitTokenClient();
   if(!adminTokenClient){ alert('Still loading Google sign-in — please try again in a moment.'); return; }
-  adminTokenClient.requestAccessToken({prompt:''});
+  adminTokenClient.requestAccessToken({prompt:'select_account'});
 }
 function adminLoadRegistry(){
   return fetch(`https://www.googleapis.com/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?alt=media`,{headers:{Authorization:'Bearer '+adminAccessToken}})
