@@ -1233,30 +1233,42 @@ function updateTTTime(idx, field, value){
 }
 
 function hmTeachers(){
-  const rows = DB.teachers.map(t=>`
+  const rows = DB.teachers.map(t=>{
+    const accessBadge = t.drivePermissionId
+      ? `<span class="ann-badge bg-green-100 text-green-700">✅ Can Save to Drive</span>`
+      : `<span class="ann-badge bg-gray-100 text-gray-600">Local only</span>`;
+    return `
     <tr class="border-b">
       <td class="py-2">${t.photo?`<img src="${t.photo}" class="w-9 h-9 rounded-full object-cover">`:'<span class="text-xl">👤</span>'}</td>
       <td>${esc(t.name)}</td><td>${esc(t.subject)}</td><td>${esc(t.cls)}</td>
+      <td class="text-xs">${esc(t.gmail||'—')}</td>
+      <td>${accessBadge}</td>
       <td class="whitespace-nowrap">
-        <button onclick="resetTeacherPass('${t.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">🔑 Reset Password</button>
+        <button onclick="resetTeacherPass('${t.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">🔑 Password</button>
+        ${t.drivePermissionId
+          ? `<button onclick="driveRevokeTeacherAccess('${t.id}')" class="text-red-600 text-sm font-bold mr-2">🚫 Revoke Drive Access</button>`
+          : `<button onclick="driveGrantTeacherAccess('${t.id}')" class="text-green-700 text-sm font-bold mr-2">🔓 Grant Drive Access</button>`}
         <button onclick="delTeacher('${t.id}')" class="text-red-600 text-sm font-bold">🗑️ Remove</button>
       </td>
-    </tr>`).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No teachers yet.</td></tr>`;
+    </tr>`;
+  }).join('') || `<tr><td colspan="7" class="text-center text-gray-400 py-4">No teachers yet.</td></tr>`;
   const classOpts = DB.config.classes.map(c=>`<option>${esc(c)}</option>`).join('');
   return card(`
     <h2 class="text-xl font-bold text-[var(--navy)] mb-4">👩‍🏫 Teachers</h2>
-    <p class="text-sm text-gray-500 mb-3">Set a login password for the teacher when assigning them to a class — they'll use it to log in. Photo is optional and shows up in the Staff directory that Parents and Teachers can see.</p>
-    <div class="grid md:grid-cols-6 gap-3 mb-4">
+    <p class="text-sm text-gray-500 mb-3">Set a login password for the teacher when assigning them to a class — they'll use it to log in. Photo is optional and shows up in the Staff directory that Parents and Teachers can see. Add their Gmail if you want to grant them Drive edit access with one click below.</p>
+    <div class="grid md:grid-cols-6 gap-3 mb-2">
       <input id="tName" placeholder="Teacher Name" class="border rounded-lg px-3 py-2">
       <input id="tSubject" placeholder="Subject" class="border rounded-lg px-3 py-2">
       <select id="tClass" class="border rounded-lg px-3 py-2">${classOpts}</select>
       <input id="tPassword" type="text" placeholder="Set Login Password" class="border rounded-lg px-3 py-2">
+      <input id="tGmail" type="email" placeholder="Gmail (for Drive access)" class="border rounded-lg px-3 py-2">
       <input id="tPhoto" type="file" accept="image/*" class="border rounded-lg px-2 py-2 text-sm">
-      <button onclick="addTeacher()" class="navy-btn rounded-lg px-3 py-2 font-bold">+ Add Teacher</button>
     </div>
+    <button onclick="addTeacher()" class="navy-btn rounded-lg px-4 py-2 font-bold mb-4">+ Add Teacher</button>
+    ${!driveAccessToken?'<p class="text-xs text-amber-600 mb-3">Connect Google Drive (Cloud Sync tab) as Headmaster first — Grant/Revoke Drive Access buttons need that connection to work.</p>':''}
     <div class="overflow-x-auto">
     <table class="w-full text-sm">
-      <thead><tr class="text-left border-b"><th class="py-2">Photo</th><th>Name</th><th>Subject</th><th>Class</th><th>Action</th></tr></thead>
+      <thead><tr class="text-left border-b"><th class="py-2">Photo</th><th>Name</th><th>Subject</th><th>Class</th><th>Gmail</th><th>Drive Access</th><th>Action</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     </div>
@@ -1267,10 +1279,11 @@ function addTeacher(){
   const subject=document.getElementById('tSubject').value.trim();
   const cls=document.getElementById('tClass').value;
   const password=document.getElementById('tPassword').value.trim();
+  const gmail=document.getElementById('tGmail').value.trim();
   const photoInput=document.getElementById('tPhoto');
   if(!name||!subject){ alert('Please enter teacher name and subject.'); return; }
   if(!password){ alert('Please set a login password for this teacher.'); return; }
-  const finish=(photo)=>{ DB.teachers.push({id:uid(), name, subject, cls, password, photo:photo||null}); saveDB(); render(); };
+  const finish=(photo)=>{ DB.teachers.push({id:uid(), name, subject, cls, password, gmail, photo:photo||null, drivePermissionId:null}); saveDB(); render(); };
   if(photoInput.files && photoInput.files[0]){
     const reader = new FileReader();
     reader.onload = e=>finish(e.target.result);
@@ -1284,6 +1297,37 @@ function resetTeacherPass(id){
   if(np===null) return;
   if(!np.trim()){ alert('Password cannot be empty.'); return; }
   t.password = np.trim(); saveDB(); alert('Password updated.');
+}
+/* ---------- Grant/Revoke a teacher's own Drive edit access, from inside the app ----------
+   Uses the same Drive Permissions API as "Enable Parent Viewing" — Headmaster must be
+   connected (Cloud Sync) since only their token can manage sharing on their own file. */
+function driveGrantTeacherAccess(teacherId){
+  if(!driveAccessToken || !DRIVE_FILE_ID){ alert('Connect Google Drive first (Cloud Sync tab, as Headmaster).'); return; }
+  const teacher = DB.teachers.find(t=>t.id===teacherId); if(!teacher) return;
+  let gmail = (teacher.gmail||'').trim();
+  if(!gmail){ gmail = (prompt(`Enter ${teacher.name}'s Gmail address:`,'')||'').trim(); if(!gmail) return; teacher.gmail=gmail; }
+  fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}/permissions?sendNotificationEmail=true`,{
+    method:'POST', headers:{Authorization:'Bearer '+driveAccessToken,'Content-Type':'application/json'},
+    body: JSON.stringify({type:'user', role:'writer', emailAddress:gmail})
+  }).then(r=>r.json()).then(res=>{
+    if(res.id){
+      teacher.drivePermissionId = res.id;
+      saveDB(); render();
+      alert(`${teacher.name} can now save changes to Google Drive.\n\nThey'll get an email from Google Drive — they should then open the School Link on their own device and connect Google Drive in Cloud Sync using ${gmail}.`);
+    } else alert('Could not grant access: '+(res.error?.message||'unknown error'));
+  }).catch(e=>alert('Could not grant access: '+e.message));
+}
+function driveRevokeTeacherAccess(teacherId){
+  if(!driveAccessToken || !DRIVE_FILE_ID){ alert('Connect Google Drive first (Cloud Sync tab, as Headmaster).'); return; }
+  const teacher = DB.teachers.find(t=>t.id===teacherId); if(!teacher) return;
+  if(!teacher.drivePermissionId){ alert('This teacher does not have Drive edit access yet.'); return; }
+  if(!confirm(`Remove ${teacher.name}'s ability to save changes to Google Drive? They will still be able to log in and use the app, but their changes will only stay on their own device.`)) return;
+  fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}/permissions/${teacher.drivePermissionId}`,{
+    method:'DELETE', headers:{Authorization:'Bearer '+driveAccessToken}
+  }).then(r=>{
+    if(r.ok || r.status===204){ teacher.drivePermissionId=null; saveDB(); render(); }
+    else r.json().then(res=>alert('Could not remove access: '+(res.error?.message||'unknown error'))).catch(()=>alert('Could not remove access.'));
+  }).catch(e=>alert('Could not remove access: '+e.message));
 }
 
 /* ---------- Headmaster marks Teacher attendance — same P/A/L method as Student attendance ---------- */
