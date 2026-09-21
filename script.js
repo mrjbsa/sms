@@ -139,7 +139,7 @@ function copyShareLink(){
    ============================================================ */
 const OWNER_GMAIL = 'mrjbsa.313@gmail.com';           // the Google account that unlocks the Platform Admin panel
 const OWNER_CONTACT_EMAIL = 'mrjbsa.official@outlook.com'; // shown to schools that are denied / still pending
-const MASTER_REGISTRY_FILE_ID = '';                        // paste the registry file's ID here once created — leave blank to disable the gate entirely
+const MASTER_REGISTRY_FILE_ID = '1k4GUW-UpL1UHIycxXajWsV3attplEdto';                        // paste the registry file's ID here once created — leave blank to disable the gate entirely
 
 let APPROVAL_STATE = {status:'unknown', checkedAt:null}; // 'unknown' | 'approved' | 'pending' | 'denied'
 let adminTokenClient=null, adminAccessToken=null, adminConnectedEmail=null, adminRegistry=null;
