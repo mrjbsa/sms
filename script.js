@@ -206,12 +206,13 @@ function adminInitTokenClient(){
   if(adminTokenClient || !window.google || !google.accounts) return;
   adminTokenClient = google.accounts.oauth2.initTokenClient({
     client_id: GOOGLE_CLIENT_ID,
-    scope: 'https://www.googleapis.com/auth/drive',
+    scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email',
     callback:(resp)=>{
       if(resp.error){ alert('Google sign-in failed: '+resp.error); return; }
       adminAccessToken = resp.access_token;
       fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{Authorization:'Bearer '+adminAccessToken}})
-        .then(r=>r.json()).then(p=>{
+        .then(r=>{ if(!r.ok) throw new Error('Could not read your Google account info (status '+r.status+').'); return r.json(); })
+        .then(p=>{
           adminConnectedEmail = p.email;
           if(OWNER_GMAIL && !OWNER_GMAIL.includes('PASTE') && p.email.toLowerCase()!==OWNER_GMAIL.toLowerCase()){
             alert(`This Google account is not authorised as the Platform Admin.\n\nYou signed in as: ${p.email}\nExpected admin account: ${OWNER_GMAIL}\n\nPlease try again and choose the correct Google account.`);
@@ -221,7 +222,8 @@ function adminInitTokenClient(){
           sessionStorage.setItem('bfhs_session', JSON.stringify(SESSION));
           alert(`Signed in as Platform Admin (${p.email}).`);
           if(registryConfigured()) adminLoadRegistry().then(render); else render();
-        });
+        })
+        .catch(e=>alert('Platform Admin sign-in failed: '+e.message));
     }
   });
 }
@@ -329,15 +331,17 @@ function driveInitTokenClient(){
   if(driveTokenClient || !window.google || !google.accounts) return;
   driveTokenClient = google.accounts.oauth2.initTokenClient({
     client_id: GOOGLE_CLIENT_ID,
-    scope: 'https://www.googleapis.com/auth/drive',
+    scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email',
     callback: (resp)=>{
       if(resp.error){ alert('Google sign-in failed: '+resp.error); return; }
       driveAccessToken = resp.access_token;
       fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{Authorization:'Bearer '+driveAccessToken}})
-        .then(r=>r.json()).then(p=>{
+        .then(r=>{ if(!r.ok) throw new Error('Could not read your Google account info (status '+r.status+').'); return r.json(); })
+        .then(p=>{
           driveConnectedEmail = p.email;
           if(!DRIVE_FILE_ID) driveCreateFile(); else drivePullNow(true).then(render);
-        });
+        })
+        .catch(e=>alert('Google Drive sign-in failed: '+e.message));
     }
   });
 }
