@@ -88,6 +88,14 @@ function saveDB(){ localStorage.setItem(DB_KEY, JSON.stringify(DB)); driveAutoSa
      2. Google Cloud Console -> create an OAuth Client ID (Web app)
         and an API key; add the hosted URL under Authorized JS origins.
      3. Paste them below, then re-upload.
+     4. In OAuth consent screen -> "Publish App" (move out of Testing)
+        so ANY Gmail can sign in, not just ones you've manually added
+        as Test Users. Uses the 'drive.file' scope (only ever touches
+        files this app itself created) so Google's review for this is
+        the light "sensitive scope" kind, not the costly, slow
+        "restricted scope" security assessment — while still in
+        Testing mode, only the ~100 Gmails you've added as Test Users
+        can connect; everyone else sees an "Access blocked" screen.
    That ONE hosted copy then serves UNLIMITED independent schools:
    the first time a Headmaster clicks "Connect Google Drive", a new,
    private data file is created in THEIR OWN Google Drive (not
@@ -206,7 +214,7 @@ function adminInitTokenClient(){
   if(adminTokenClient || !window.google || !google.accounts) return;
   adminTokenClient = google.accounts.oauth2.initTokenClient({
     client_id: GOOGLE_CLIENT_ID,
-    scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email',
+    scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email',
     callback:(resp)=>{
       if(resp.error){ alert('Google sign-in failed: '+resp.error); return; }
       adminAccessToken = resp.access_token;
@@ -331,7 +339,7 @@ function driveInitTokenClient(){
   if(driveTokenClient || !window.google || !google.accounts) return;
   driveTokenClient = google.accounts.oauth2.initTokenClient({
     client_id: GOOGLE_CLIENT_ID,
-    scope: 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email',
+    scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email',
     callback: (resp)=>{
       if(resp.error){ alert('Google sign-in failed: '+resp.error); return; }
       driveAccessToken = resp.access_token;
@@ -803,6 +811,7 @@ function renderLogin(){
           <div id="loginError" class="text-red-600 text-sm mt-2 hidden"></div>
           <button onclick="doLogin()" class="w-full navy-btn rounded-lg py-2.5 mt-4 font-bold">Login</button>
           <p class="text-center text-xs text-gray-400 mt-3"><button onclick="adminConnect()" class="underline">⚙️ Platform Admin</button></p>
+          <p class="text-center text-xs text-gray-400 mt-2"><a href="privacy-policy.html" target="_blank" class="underline">Privacy Policy</a> · <a href="terms-of-service.html" target="_blank" class="underline">Terms of Service</a></p>
         </div>
         <div class="doc-footer">
           <span class="lead">Learn Today</span>
