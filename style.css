@@ -118,11 +118,19 @@
   ::-webkit-scrollbar{ width:8px; height:8px; }
   ::-webkit-scrollbar-thumb{ background:#c7cbe0; border-radius:4px; }
 
-  /* ---------- Print fallback: keeps every doc-frame card to one A4 page
-     even if someone prints straight from the browser instead of the
-     dedicated Print button (which already opens its own A4 popup). ---------- */
+  /* ---------- A4 sheet used for printing and "Save JPG" ----------
+     One sheet = exactly 210 x 297 mm. The card inside is stretched to the
+     A4 proportion and scaled (by script.js -> fitToA4) to fill it edge to edge. */
+  .a4-sheet{ width:210mm; height:297mm; overflow:hidden; position:relative; background:#fff; }
+  .a4-sheet .doc-frame{
+    display:flex; flex-direction:column;
+    position:absolute; left:0; top:0;
+    max-width:none !important; margin:0 !important;
+    border:none !important; border-radius:0 !important; box-shadow:none !important;
+    transform-origin:top left;
+  }
+  .a4-sheet .doc-frame .doc-footer{ margin-top:auto; }
   @media print{
-    @page{ size:A4; margin:10mm; }
     .no-print{ display:none !important; }
-    .doc-frame{ width:190mm; min-height:277mm; box-shadow:none; border:none; }
+    *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
   }

@@ -778,26 +778,80 @@ function renderMarksheetCard(student, marksData, yearLabel){
   </div>`;
 }
 
-function printCard(html){
-  const styleTag = document.querySelector('style').outerHTML;
+/* ============================================================
+   PRINT + SAVE-AS-JPG ENGINE
+   - Marksheet / Timetable / Fee Voucher: exactly one A4 sheet
+     (210 x 297 mm), same design as the on-screen card, scaled to
+     fill the page edge-to-edge.
+   - ID Card: exactly 85.6 x 54 mm (credit-card size).
+   - "Save JPG" produces the very same picture as a high-res image.
+   ============================================================ */
+const A4_W_PX = 793.7, A4_H_PX = 1122.52;      // 210mm x 297mm at 96 dpi
+const CARD_BASE_W = {marksheetCard:620, timetableCard:480, feeVoucherCard:480};
+const CARD_LABEL  = {marksheetCard:'Marksheet', timetableCard:'Timetable', feeVoucherCard:'Fee-Voucher', idCard:'ID-Card'};
+
+/* Self-contained (also injected as text into the print window): stretches the
+   .doc-frame to the A4 aspect ratio, then scales it to fill the sheet. */
+function fitToA4(sheet){
+  const f = sheet.querySelector('.doc-frame'); if(!f) return;
+  const SW=793.7, SH=1122.52, R=SH/SW;
+  let W = parseFloat(sheet.getAttribute('data-w'))||520;
+  f.style.width = W+'px'; f.style.height = 'auto';
+  for(let i=0;i<8;i++){ const need = f.offsetHeight/R; if(need <= W+0.5) break; W = need; f.style.width = W+'px'; }
+  f.style.height = (W*R)+'px';
+  f.style.transform = 'scale('+(SW/W)+')';
+}
+function cleanCardHtml(el){ return el.outerHTML.replace(/ id="[^"]*"/, ''); }
+
+function printEl(id){
+  const el = document.getElementById(id); if(!el) return;
   const w = window.open('', 'PrintWindow', 'width=900,height=1000');
   if(!w){ alert('Please allow pop-ups for this site to print.'); return; }
+  const css = new URL('style.css', location.href).href;
+  const isId = id==='idCard';
+  const body = isId ? cleanCardHtml(el)
+                    : `<div class="a4-sheet" data-w="${CARD_BASE_W[id]||520}">${cleanCardHtml(el)}</div>`;
+  const page = isId ? '85.6mm 54mm' : '210mm 297mm';
+  const runner = isId
+    ? `window.addEventListener('load',function(){ setTimeout(function(){ window.focus(); window.print(); }, 400); });`
+    : `${fitToA4.toString()}
+       window.addEventListener('load',function(){ setTimeout(function(){ fitToA4(document.querySelector('.a4-sheet')); setTimeout(function(){ window.focus(); window.print(); }, 350); }, 700); });`;
   w.document.open();
-  w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Print</title>
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${CARD_LABEL[id]||'Print'}</title>
     <script src="https://cdn.tailwindcss.com"><\/script>
-    ${styleTag}
+    <link rel="stylesheet" href="${css}">
     <style>
-      @page{ size:A4; margin:10mm; }
-      html,body{background:#fff;margin:0;padding:0;}
-      body{display:flex;justify-content:center;padding:8mm 0;}
-      .doc-frame{ width:190mm; min-height:277mm; margin:0 auto; box-shadow:none !important; border:none !important; }
-      @media print{ .doc-frame{ width:190mm; min-height:277mm; } }
-    </style>
-    </head><body>${html}</body></html>`);
+      @page{ size:${page}; margin:0; }
+      html,body{ margin:0; padding:0; background:#fff; }
+      *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+    </style></head><body>${body}<script>${runner}<\/script></body></html>`);
   w.document.close();
-  const doPrint = ()=>{ try{ w.focus(); w.print(); }catch(e){} };
-  w.onload = doPrint;
-  setTimeout(doPrint, 700); // fallback in case onload already fired before listener attached
+}
+
+async function jpgEl(id){
+  const el = document.getElementById(id); if(!el) return;
+  if(typeof html2canvas==='undefined'){ alert('The image-saving library did not load. Please check your internet connection, refresh the page and try again.'); return; }
+  const isId = id==='idCard';
+  const host = document.createElement('div');
+  host.style.cssText = 'position:fixed;left:-99999px;top:0;background:#fff;';
+  host.innerHTML = isId ? cleanCardHtml(el)
+                        : `<div class="a4-sheet" data-w="${CARD_BASE_W[id]||520}">${cleanCardHtml(el)}</div>`;
+  document.body.appendChild(host);
+  const target = host.firstElementChild;
+  try{
+    if(!isId) fitToA4(target);
+    await new Promise(r=>setTimeout(r,150));
+    const canvas = await html2canvas(target, {scale: isId?6:3, backgroundColor:'#ffffff', useCORS:true, logging:false});
+    const who = (el.getAttribute('data-fname')||'').replace(/[^\w\-]+/g,'_');
+    const name = `${CARD_LABEL[id]||'Card'}${who?'-'+who:''}-${todayISO()}.jpg`;
+    canvas.toBlob(blob=>{
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
+    }, 'image/jpeg', 0.95);
+  }catch(e){ alert('Could not save the image: '+e.message); }
+  finally{ host.remove(); }
 }
 
 /* ============================================================
@@ -1218,7 +1272,7 @@ function hmTimetable(){
     <div>
       ${c.timetable ? `
         <div class="flex justify-end gap-2 mb-2 no-print">
-          <button onclick="printCard(document.getElementById('timetableCard').outerHTML)" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button>
+          <button onclick="printEl('timetableCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('timetableCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button>
         </div>
         ${renderTimetableCard({editable:true})}
       ` : card('<p class="text-gray-500 text-center py-10">Generate a timetable to preview it here.</p>')}
@@ -1547,7 +1601,7 @@ function viewMarksheet(id){
   setTimeout(()=>{
     const box = document.getElementById('marksheetPreview');
     if(box){
-      box.innerHTML = `<div class="flex justify-end mb-2 no-print"><button onclick="printCard(document.getElementById('marksheetCard').outerHTML)" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button></div>` + renderMarksheetCard(stu);
+      box.innerHTML = `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('marksheetCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('marksheetCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` + renderMarksheetCard(stu);
       box.scrollIntoView({behavior:'smooth'});
     }
   },0);
@@ -1573,7 +1627,7 @@ function viewArchivedMarksheet(studentId, idx){
   const a = (stu.marksArchive||[])[idx]; if(!a) return;
   const box = document.getElementById('archiveMarksheetView');
   if(box){
-    box.innerHTML = `<div class="flex justify-end mb-2 no-print"><button onclick="printCard(document.getElementById('marksheetCard').outerHTML)" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button></div>` +
+    box.innerHTML = `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('marksheetCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('marksheetCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` +
       renderMarksheetCard({...stu, cls:a.cls}, a.marks, a.year);
     box.scrollIntoView({behavior:'smooth'});
   }
@@ -2074,7 +2128,7 @@ function hmFees(){
 function viewFeeVoucher(studentId, month){
   const box = document.getElementById('feeVoucherPreview'); if(!box) return;
   const stu = DB.students.find(s=>s.id===studentId); if(!stu) return;
-  box.innerHTML = `<div class="flex justify-end mb-2 no-print"><button onclick="printCard(document.getElementById('feeVoucherCard').outerHTML)" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button></div>` + renderFeeVoucherCard(stu, month);
+  box.innerHTML = `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('feeVoucherCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('feeVoucherCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` + renderFeeVoucherCard(stu, month);
 }
 function renderParentFees(stu){
   const cm = currentMonthKey();
@@ -2162,32 +2216,41 @@ function hmHomework(){
    ============================================================ */
 function renderIdCard(person, role){
   const cfg = DB.config;
-  const photo = person.photo ? `<img src="${person.photo}" class="w-full h-full object-cover rounded-full">` : '👤';
-  const idNo = role==='Student' ? `STU-${esc(person.roll)}-${esc(person.cls)}` : `STF-${esc(String(person.id).slice(-6).toUpperCase())}`;
-  return `
-  <div class="doc-frame max-w-xs mx-auto" id="idCard">
-    <div class="doc-topbar"></div>
-    <div class="doc-arc" style="padding:20px 16px 30px;">
-      <div class="doc-shield">${cfg.logo?`<img src="${cfg.logo}" class="w-full h-full object-cover rounded-lg">`:'🎓'}</div>
-      <div class="doc-title" style="font-size:1.2rem;">${esc(cfg.schoolName.split(' ').slice(0,2).join(' '))}</div>
-      <div class="doc-subtitle" style="font-size:.8rem;">${esc(cfg.schoolName.split(' ').slice(2).join(' '))}</div>
-      <div class="doc-badge" style="padding:5px 16px;font-size:.75rem;">★ IDENTITY CARD ★</div>
+  const isStu = role==='Student';
+  const photo = person.photo ? `<img src="${person.photo}" style="width:100%;height:100%;object-fit:cover;">` : `<span style="font-size:20pt;">👤</span>`;
+  const logo = cfg.logo ? `<img src="${cfg.logo}" style="width:100%;height:100%;object-fit:cover;">` : '🎓';
+  const idNo = isStu ? `STU-${esc(person.roll)}-${esc(person.cls)}` : `STF-${esc(String(person.id).slice(-6).toUpperCase())}`;
+  const line2 = isStu ? `Class ${esc(person.cls)}` : `${esc(person.subject)} · Class ${esc(person.cls)}`;
+  const rows = isStu
+    ? [['ID No',idNo],['Father',person.father||'-'],['Roll No',person.roll],['Session',cfg.year]]
+    : [['ID No',idNo],['Subject',person.subject],['Class',person.cls],['Session',cfg.year]];
+  const rowsHtml = rows.map(r=>`<div style="display:flex;font-size:6.3pt;line-height:1.6;"><b style="width:12.5mm;flex:none;color:#0b1a4a;">${r[0]}</b><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r[1])}</span></div>`).join('');
+  const card = `
+  <div id="idCard" data-fname="${esc(person.name)}" style="width:85.6mm;height:54mm;box-sizing:border-box;background:#fbfbf9;border-radius:3mm;overflow:hidden;display:flex;font-family:'Trebuchet MS','Segoe UI',sans-serif;border:0.3mm solid #dcdfe8;color:#1a1a2e;">
+    <div style="width:27mm;flex:none;background:#0b1a4a;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.8mm;border-right:1mm solid #f0a500;">
+      <div style="width:19mm;height:19mm;border-radius:50%;border:0.8mm solid #f0a500;background:#eef1f8;display:flex;align-items:center;justify-content:center;overflow:hidden;">${photo}</div>
+      <div style="background:#f0a500;color:#081235;font-weight:700;font-size:5.5pt;letter-spacing:0.4mm;padding:0.5mm 2.4mm;border-radius:99px;">${role.toUpperCase()}</div>
     </div>
-    <div class="p-4 text-center">
-      <div class="w-20 h-20 mx-auto rounded-full border-4 flex items-center justify-center text-3xl mb-2" style="border-color:var(--gold);background:#eef1f8;">${photo}</div>
-      <div class="font-bold text-lg text-[var(--navy)]">${esc(person.name)}</div>
-      <div class="text-xs text-gray-500 mb-3">${role}${role==='Student'?` — Class ${esc(person.cls)}`:role==='Teacher'?` — ${esc(person.subject)} (${esc(person.cls)})`:''}</div>
-      <div class="ms-info-box text-left text-xs space-y-1">
-        <div><b>ID No:</b> ${idNo}</div>
-        ${role==='Student'?`<div><b>Father:</b> ${esc(person.father||'-')}</div><div><b>Roll No:</b> ${esc(person.roll)}</div>`:''}
-        <div><b>Session:</b> ${esc(cfg.year)}</div>
+    <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+      <div style="background:#0b1a4a;color:#fff;padding:1.6mm 2.4mm;display:flex;align-items:center;gap:1.6mm;border-bottom:0.7mm solid #f0a500;">
+        <div style="width:7mm;height:7mm;flex:none;border:0.5mm solid #f0a500;border-radius:1.4mm 1.4mm 40% 40%;display:flex;align-items:center;justify-content:center;color:#f7c948;font-size:9pt;overflow:hidden;">${logo}</div>
+        <div style="min-width:0;">
+          <div style="font-family:Georgia,serif;font-weight:700;font-size:7pt;line-height:1.15;">${esc(cfg.schoolName)}</div>
+          <div style="color:#f7c948;font-size:4.6pt;letter-spacing:0.35mm;margin-top:0.4mm;">★ IDENTITY CARD ★</div>
+        </div>
+      </div>
+      <div style="padding:1.8mm 2.6mm 0;flex:1;min-width:0;">
+        <div style="font-family:Georgia,serif;font-weight:700;color:#0b1a4a;font-size:9.5pt;line-height:1.15;word-break:break-word;">${esc(person.name)}</div>
+        <div style="color:#666;font-size:6pt;margin:0.4mm 0 1.4mm;">${line2}</div>
+        ${rowsHtml}
+      </div>
+      <div style="background:#0b1a4a;padding:0.9mm 2.6mm;display:flex;justify-content:space-between;font-family:'Brush Script MT',cursive;font-size:7pt;">
+        <span style="color:#fff;">Learn Today</span><span style="color:#f7c948;">Lead Tomorrow</span>
       </div>
     </div>
-    <div class="doc-footer">
-      <span class="lead">Learn Today</span>
-      <span class="lead2">Lead Tomorrow</span>
-    </div>
   </div>`;
+  /* on-screen preview is shown 1.5x bigger; print / JPG always use the real 85.6 x 54 mm card */
+  return `<div style="overflow-x:auto;"><div style="width:128.4mm;height:81mm;margin:0 auto;"><div style="transform:scale(1.5);transform-origin:top left;width:85.6mm;">${card}</div></div></div>`;
 }
 function hmIdCards(){
   const type = document.getElementById('idType')?.value || 'student';
@@ -2224,13 +2287,13 @@ function viewIdCard(id, type){
   const box = document.getElementById('idCardPreview'); if(!box) return;
   const person = type==='student' ? DB.students.find(s=>s.id===id) : DB.teachers.find(t=>t.id===id);
   if(!person) return;
-  box.innerHTML = `<div class="flex justify-end mb-2 no-print"><button onclick="printCard(document.getElementById('idCard').outerHTML)" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button></div>` + renderIdCard(person, type==='student'?'Student':'Teacher');
+  box.innerHTML = `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('idCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('idCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` + renderIdCard(person, type==='student'?'Student':'Teacher');
 }
 function tIdCard(teacher){
-  return `<div class="flex justify-end mb-2 no-print"><button onclick="printCard(document.getElementById('idCard').outerHTML)" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button></div>` + renderIdCard(teacher,'Teacher');
+  return `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('idCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('idCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` + renderIdCard(teacher,'Teacher');
 }
 function pIdCard(stu){
-  return `<div class="flex justify-end mb-2 no-print"><button onclick="printCard(document.getElementById('idCard').outerHTML)" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button></div>` + renderIdCard(stu,'Student');
+  return `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('idCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('idCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` + renderIdCard(stu,'Student');
 }
 
 /* ============================================================
@@ -2283,7 +2346,7 @@ function renderParent(){
   if(ACTIVE_TAB==='marksheet') content = `
     <div class="flex justify-end gap-2 mb-2 no-print">
       <button onclick="driveParentPull(false)" class="bg-gray-200 rounded-lg px-4 py-1.5 text-sm font-bold">🔄 Refresh${driveLastSync?` (synced ${driveLastSync.toLocaleTimeString()})`:''}</button>
-      <button onclick="printCard(document.getElementById('marksheetCard').outerHTML)" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button>
+      <button onclick="printEl('marksheetCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('marksheetCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button>
     </div>
     ${renderMarksheetCard(stu)}`;
   if(ACTIVE_TAB==='attendance') content = renderAttendanceSummary(stu);
