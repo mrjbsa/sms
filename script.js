@@ -164,12 +164,25 @@ function refreshApprovalStatus(){
     .catch(()=>{ if(APPROVAL_STATE.status==='unknown') APPROVAL_STATE={status:'pending', checkedAt:new Date()}; });
 }
 function checkApprovalStatus(){ refreshApprovalStatus().then(render); }
+const OWNER_WHATSAPP = ''; // optional: your WhatsApp number with country code, digits only (e.g. 923001234567) — if blank, WhatsApp opens its normal "choose a contact" screen
+function approvalRequestText(schoolName, gmail){
+  return `New School Registration\n\nSchool Name: ${schoolName}\nHeadmaster Gmail: ${gmail||'(not set)'}\nSchool File ID: ${DRIVE_FILE_ID}`;
+}
 function approvalRequestLinks(schoolName, gmail){
-  const text = `New School Registration\n\nSchool Name: ${schoolName}\nHeadmaster Gmail: ${gmail||'(not set)'}\nSchool File ID: ${DRIVE_FILE_ID}`;
+  const text = approvalRequestText(schoolName, gmail);
+  const subject = 'New School Registration — '+schoolName;
   return {
-    mailto: `mailto:${OWNER_CONTACT_EMAIL}?subject=${encodeURIComponent('New School Registration — '+schoolName)}&body=${encodeURIComponent(text)}`,
-    wa: `https://wa.me/?text=${encodeURIComponent(text)}`
+    gmail: `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(OWNER_CONTACT_EMAIL)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(text)}`,
+    mailto: `mailto:${OWNER_CONTACT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(text)}`,
+    wa: `https://wa.me/${OWNER_WHATSAPP}?text=${encodeURIComponent(text)}`
   };
+}
+function copyApprovalRequest(){
+  const hm = DB.config.headmasterAccount || {};
+  const text = approvalRequestText(DB.config.schoolName||'My School', hm.gmail||driveConnectedEmail||'');
+  const done = ()=>alert('Request details copied! Paste them into an email/WhatsApp message to '+OWNER_CONTACT_EMAIL);
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, ()=>prompt('Copy this and send it to '+OWNER_CONTACT_EMAIL+':', text));
+  else prompt('Copy this and send it to '+OWNER_CONTACT_EMAIL+':', text);
 }
 function renderApprovalGate(){
   if(APPROVAL_STATE.status==='denied'){
@@ -197,9 +210,11 @@ function renderApprovalGate(){
       <div class="p-6 text-center space-y-3">
         <p class="text-gray-700">This school's registration needs to be approved before the dashboard opens. Send your request if you haven't already:</p>
         <div class="flex flex-col gap-2">
-          <a href="${links.mailto}" class="navy-btn rounded-lg px-5 py-2 font-bold">📧 Send Request by Email</a>
-          <a href="${links.wa}" target="_blank" class="bg-green-600 text-white rounded-lg px-5 py-2 font-bold">💬 Send Request on WhatsApp</a>
+          <a href="${links.gmail}" target="_blank" rel="noopener" class="navy-btn rounded-lg px-5 py-2 font-bold">📧 Send Request via Gmail</a>
+          <a href="${links.wa}" target="_blank" rel="noopener" class="bg-green-600 text-white rounded-lg px-5 py-2 font-bold">💬 Send Request on WhatsApp</a>
+          <button onclick="copyApprovalRequest()" class="bg-gray-200 rounded-lg px-5 py-2 font-bold">📋 Copy Request Details</button>
         </div>
+        <p class="text-xs text-gray-500">Or send these details yourself to <b>${esc(OWNER_CONTACT_EMAIL)}</b> from any email — <a href="${links.mailto}" class="underline">open in your mail app</a>.</p>
         <button onclick="checkApprovalStatus()" class="gold-btn rounded-lg px-5 py-2 font-bold mt-2">🔄 Check Approval Status</button>
         <button onclick="logout()" class="text-sm text-gray-500 underline mt-2 block mx-auto">⬅️ Back to Login</button>
         <p class="text-xs text-gray-400 mt-2">Questions? 📧 ${esc(OWNER_CONTACT_EMAIL)}</p>
