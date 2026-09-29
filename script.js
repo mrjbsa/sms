@@ -746,7 +746,7 @@ function renderMarksheetCard(student, marksData, yearLabel){
         </div>
       </div>
 
-      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4">
+      <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-4 ms-grid3">
         <div class="ms-summary-box">
           <div class="row"><span>TOTAL OBTAINED</span><span>${totalObtainedAll}/${totalMaxAll}</span></div>
           <div class="row"><span>PERCENTAGE</span><span class="text-green-600">${overallPct.toFixed(2)}%</span></div>
@@ -785,73 +785,170 @@ function renderMarksheetCard(student, marksData, yearLabel){
      fill the page edge-to-edge.
    - ID Card: exactly 85.6 x 54 mm (credit-card size).
    - "Save JPG" produces the very same picture as a high-res image.
+   The sheet is laid out ONCE here in the main page (where all styles are
+   already loaded and stable) and the finished result is handed to the
+   print window / image renderer, so both always look identical.
    ============================================================ */
-const A4_W_PX = 793.7, A4_H_PX = 1122.52;      // 210mm x 297mm at 96 dpi
 const CARD_BASE_W = {marksheetCard:620, timetableCard:480, feeVoucherCard:480};
 const CARD_LABEL  = {marksheetCard:'Marksheet', timetableCard:'Timetable', feeVoucherCard:'Fee-Voucher', idCard:'ID-Card'};
 
-/* Self-contained (also injected as text into the print window): stretches the
-   .doc-frame to the A4 aspect ratio, then scales it to fill the sheet. */
+/* Stretches the .doc-frame to the A4 proportion, then scales it to fill the sheet. */
 function fitToA4(sheet){
   const f = sheet.querySelector('.doc-frame'); if(!f) return;
   const SW=793.7, SH=1122.52, R=SH/SW;
   let W = parseFloat(sheet.getAttribute('data-w'))||520;
-  f.style.width = W+'px'; f.style.height = 'auto';
-  for(let i=0;i<8;i++){ const need = f.offsetHeight/R; if(need <= W+0.5) break; W = need; f.style.width = W+'px'; }
+  for(let i=0;i<14;i++){ f.style.width=W+'px'; f.style.height='auto'; const need=f.offsetHeight/R; if(need<=W+0.5) break; W=need; }
+  /* safety pass: never let real content be taller than the forced box — that would
+     silently clip the bottom (e.g. the footer); a little blank space is the safe
+     direction to err in instead. */
+  f.style.width = W+'px'; f.style.height='auto';
+  const finalNeed = f.offsetHeight/R;
+  if(finalNeed > W) W = finalNeed;
+  f.style.width = W+'px';
   f.style.height = (W*R)+'px';
   f.style.transform = 'scale('+(SW/W)+')';
 }
-function cleanCardHtml(el){ return el.outerHTML.replace(/ id="[^"]*"/, ''); }
+/* Print / image copy of a card: no editable inputs (they cut text off), no duplicate id. */
+function staticCardHtml(el){
+  const c = el.cloneNode(true);
+  c.removeAttribute('id');
+  c.querySelectorAll('input,select,textarea').forEach(inp=>{
+    const span = document.createElement('span');
+    let v = inp.value || inp.getAttribute('value') || '';
+    if(inp.type==='time' && v){ try{ v = minToTime(timeToMin(v)); }catch(e){} }
+    span.textContent = v;
+    inp.replaceWith(span);
+  });
+  c.querySelectorAll('[onclick],[onchange]').forEach(n=>{ n.removeAttribute('onclick'); n.removeAttribute('onchange'); });
+  return c.outerHTML;
+}
+const wait = ms => new Promise(r=>setTimeout(r,ms));
+/* Builds the finished (fitted) sheet inside a hidden host in the main page. */
+async function buildSheet(id){
+  const el = document.getElementById(id); if(!el) return null;
+  const host = document.createElement('div');
+  host.style.cssText = 'position:fixed;left:-99999px;top:0;background:#fff;';
+  if(id==='idCard'){
+    host.innerHTML = staticCardHtml(el);
+    document.body.appendChild(host);
+    await wait(60);
+    return {host, node: host.firstElementChild, w:323.5, h:204.1, isId:true};
+  }
+  host.innerHTML = `<div class="a4-sheet" data-w="${CARD_BASE_W[id]||520}">${staticCardHtml(el)}</div>`;
+  document.body.appendChild(host);
+  await wait(150);                       // let Tailwind generate CSS for the cloned markup
+  const sheet = host.firstElementChild;
+  fitToA4(sheet);
+  return {host, node: sheet, w:793.7, h:1122.52, isId:false};
+}
+/* Every style rule currently on the page (Tailwind + style.css) as one string. */
+function collectPageCss(){
+  let css = '';
+  for(const sh of Array.from(document.styleSheets)){
+    try{ css += Array.from(sh.cssRules).map(r=>r.cssText).join('\n')+'\n'; }catch(e){}
+  }
+  return css;
+}
 
-function printEl(id){
-  const el = document.getElementById(id); if(!el) return;
-  const w = window.open('', 'PrintWindow', 'width=900,height=1000');
+async function printEl(id){
+  if(!document.getElementById(id)) return;
+  const w = window.open('', 'PrintWindow', 'width=900,height=1000');   // opened inside the click, before any await
   if(!w){ alert('Please allow pop-ups for this site to print.'); return; }
-  const css = new URL('style.css', location.href).href;
-  const isId = id==='idCard';
-  const body = isId ? cleanCardHtml(el)
-                    : `<div class="a4-sheet" data-w="${CARD_BASE_W[id]||520}">${cleanCardHtml(el)}</div>`;
-  const page = isId ? '85.6mm 54mm' : '210mm 297mm';
-  const runner = isId
-    ? `window.addEventListener('load',function(){ setTimeout(function(){ window.focus(); window.print(); }, 400); });`
-    : `${fitToA4.toString()}
-       window.addEventListener('load',function(){ setTimeout(function(){ fitToA4(document.querySelector('.a4-sheet')); setTimeout(function(){ window.focus(); window.print(); }, 350); }, 700); });`;
+  w.document.write('<p style="font-family:sans-serif;padding:20px;">Preparing print preview…</p>');
+  let built;
+  try{ built = await buildSheet(id); }catch(e){ w.close(); alert('Could not prepare the print view: '+e.message); return; }
+  if(!built){ w.close(); return; }
+  const html = built.isId ? built.node.outerHTML : built.node.outerHTML;
+  built.host.remove();
+  const page = built.isId ? '85.6mm 54mm' : '210mm 297mm';
+  const size = built.isId ? 'width:85.6mm;height:54mm;' : 'width:210mm;height:297mm;';
   w.document.open();
   w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${CARD_LABEL[id]||'Print'}</title>
-    <script src="https://cdn.tailwindcss.com"><\/script>
-    <link rel="stylesheet" href="${css}">
+    <style>${collectPageCss()}</style>
     <style>
       @page{ size:${page}; margin:0; }
-      html,body{ margin:0; padding:0; background:#fff; }
+      html,body{ margin:0; padding:0; background:#fff; ${size} overflow:hidden; }
       *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-    </style></head><body>${body}<script>${runner}<\/script></body></html>`);
+      @media print{ .a4-sheet{ height:296.8mm; } }
+    </style></head><body>${html}
+    <script>window.addEventListener('load',function(){ setTimeout(function(){ window.focus(); window.print(); }, 500); });<\/script>
+    </body></html>`);
   w.document.close();
 }
 
-async function jpgEl(id){
-  const el = document.getElementById(id); if(!el) return;
-  if(typeof html2canvas==='undefined'){ alert('The image-saving library did not load. Please check your internet connection, refresh the page and try again.'); return; }
-  const isId = id==='idCard';
-  const host = document.createElement('div');
-  host.style.cssText = 'position:fixed;left:-99999px;top:0;background:#fff;';
-  host.innerHTML = isId ? cleanCardHtml(el)
-                        : `<div class="a4-sheet" data-w="${CARD_BASE_W[id]||520}">${cleanCardHtml(el)}</div>`;
-  document.body.appendChild(host);
-  const target = host.firstElementChild;
-  try{
-    if(!isId) fitToA4(target);
-    await new Promise(r=>setTimeout(r,150));
-    const canvas = await html2canvas(target, {scale: isId?6:3, backgroundColor:'#ffffff', useCORS:true, logging:false});
-    const who = (el.getAttribute('data-fname')||'').replace(/[^\w\-]+/g,'_');
-    const name = `${CARD_LABEL[id]||'Card'}${who?'-'+who:''}-${todayISO()}.jpg`;
+/* --- picture rendering: SVG-foreignObject first (uses the browser's own renderer, needs no library),
+       html2canvas as a backup --- */
+function svgToCanvas(node, w, h, scale){
+  return new Promise((resolve,reject)=>{
+    const cs = getComputedStyle(document.body);
+    const xhtml = new XMLSerializer().serializeToString(node);
+    const css = collectPageCss().replace(/]]>/g,']] >');
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.round(w*scale)}" height="${Math.round(h*scale)}" viewBox="0 0 ${w} ${h}">
+      <foreignObject x="0" y="0" width="${w}" height="${h}">
+        <div xmlns="http://www.w3.org/1999/xhtml" style="width:${w}px;height:${h}px;background:#fff;font-family:${cs.fontFamily.replace(/"/g,"'")};color:${cs.color};line-height:1.5;">
+          <style><![CDATA[${css}]]></style>${xhtml}
+        </div>
+      </foreignObject></svg>`;
+    const img = new Image();
+    img.onload = ()=>{
+      try{
+        const c = document.createElement('canvas');
+        c.width = Math.round(w*scale); c.height = Math.round(h*scale);
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0,0,c.width,c.height);
+        ctx.drawImage(img,0,0,c.width,c.height);
+        c.toDataURL('image/png',0.1);              // throws if the canvas got tainted
+        resolve(c);
+      }catch(e){ reject(e); }
+    };
+    img.onerror = ()=>reject(new Error('svg image failed to load'));
+    img.src = 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
+  });
+}
+let _h2cLoading=null;
+function ensureHtml2Canvas(){
+  if(window.html2canvas) return Promise.resolve();
+  if(_h2cLoading) return _h2cLoading;
+  _h2cLoading = new Promise((resolve,reject)=>{
+    const s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+    s.onload=()=>resolve();
+    s.onerror=()=>{ _h2cLoading=null; reject(new Error('image-saving backup library failed to load')); };
+    document.head.appendChild(s);
+  });
+  return _h2cLoading;
+}
+async function nodeToCanvas(node, w, h, scale){
+  try{ return await svgToCanvas(node, w, h, scale); }
+  catch(e1){
+    try{ await ensureHtml2Canvas(); }catch(e2){ throw e1; }
+    return await html2canvas(node, {scale, backgroundColor:'#ffffff', useCORS:true, logging:false,
+             width:w, height:h, windowWidth:Math.ceil(w), windowHeight:Math.ceil(h), scrollX:0, scrollY:0, x:0, y:0});
+  }
+}
+function downloadCanvasJpg(canvas, name){
+  return new Promise((resolve,reject)=>{
     canvas.toBlob(blob=>{
+      if(!blob){ reject(new Error('the browser could not create the image')); return; }
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob); a.download = name;
       document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(()=>URL.revokeObjectURL(a.href), 4000);
-    }, 'image/jpeg', 0.95);
-  }catch(e){ alert('Could not save the image: '+e.message); }
-  finally{ host.remove(); }
+      setTimeout(()=>URL.revokeObjectURL(a.href), 5000);
+      resolve();
+    }, 'image/jpeg', 0.98);
+  });
+}
+async function jpgEl(id){
+  const el = document.getElementById(id); if(!el) return;
+  let built;
+  try{
+    built = await buildSheet(id);
+    const canvas = await nodeToCanvas(built.node, built.w, built.h, built.isId ? 10 : 4);
+    const who = (el.getAttribute('data-fname')||'').replace(/[^\w\-]+/g,'_');
+    await downloadCanvasJpg(canvas, `${CARD_LABEL[id]||'Card'}${who?'-'+who:''}-${todayISO()}.jpg`);
+  }catch(e){
+    alert('Could not save the image: '+(e&&e.message?e.message:e)+'\n\nTip: use the Print button and choose "Save as PDF" as a fallback.');
+  }finally{ if(built) built.host.remove(); }
 }
 
 /* ============================================================
