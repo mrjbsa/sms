@@ -867,11 +867,26 @@ async function printEl(id){
     <style>${collectPageCss()}</style>
     <style>
       @page{ size:${page}; margin:0; }
-      html,body{ margin:0; padding:0; background:#fff; ${size} overflow:hidden; }
+      html,body{ margin:0; padding:0; background:#fff; }
+      .sheet-wrap{ ${size} overflow:hidden; }
       *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-      @media print{ .a4-sheet{ height:296.8mm; } }
-    </style></head><body>${html}
-    <script>window.addEventListener('load',function(){ setTimeout(function(){ window.focus(); window.print(); }, 500); });<\/script>
+      @media print{ .a4-sheet{ height:296.8mm; } .no-print{ display:none !important; } }
+      .pre-print-banner{
+        position:sticky; top:0; z-index:9; background:#0b1a4a; color:#fff;
+        font-family:'Trebuchet MS',sans-serif; padding:10px 16px; display:flex;
+        align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
+      }
+      .pre-print-banner b{ color:#f7c948; }
+      .pre-print-banner button{
+        background:#f0a500; color:#081235; font-weight:700; border:none;
+        border-radius:8px; padding:8px 18px; cursor:pointer; font-size:14px;
+      }
+    </style></head><body>
+    <div class="pre-print-banner no-print">
+      <span>Before printing, set <b>Paper size = ${built.isId?'the custom 85.6×54mm size (or "Card")':'A4'}</b>, <b>Margins = None</b>, <b>Scale = 100%</b> in the dialog that opens.</span>
+      <button onclick="window.print()">🖨️ Print Now</button>
+    </div>
+    <div class="sheet-wrap">${html}</div>
     </body></html>`);
   w.document.close();
 }
@@ -1101,6 +1116,7 @@ function setTab(key){ ACTIVE_TAB=key; EDITING_STUDENT_ID=null; render(); }
    HEADMASTER DASHBOARD
    ============================================================ */
 const HM_TABS = [
+  {key:'dashboard', label:'Dashboard', icon:'📈'},
   {key:'setup', label:'School Setup', icon:'🏫'},
   {key:'cloudsync', label:'Cloud Sync', icon:'☁️'},
   {key:'announcements', label:'Announcements', icon:'📣'},
@@ -1116,8 +1132,9 @@ const HM_TABS = [
   {key:'backup', label:'Backup', icon:'💾'},
 ];
 function renderHeadmaster(){
-  if(!ACTIVE_TAB || !HM_TABS.find(t=>t.key===ACTIVE_TAB)) ACTIVE_TAB='setup';
+  if(!ACTIVE_TAB || !HM_TABS.find(t=>t.key===ACTIVE_TAB)) ACTIVE_TAB='dashboard';
   let content='';
+  if(ACTIVE_TAB==='dashboard') content = hmDashboard();
   if(ACTIVE_TAB==='setup') content = hmSetup();
   if(ACTIVE_TAB==='cloudsync') content = renderCloudSyncPanel();
   if(ACTIVE_TAB==='announcements') content = hmAnnouncements();
@@ -1642,9 +1659,10 @@ function studentManagerCard(lockedClass){
         <input id="sSection" placeholder="Section (e.g. A)" value="${editing?esc(editing.section):''}" class="border rounded-lg px-3 py-2">
         <input id="sRoll" placeholder="Roll No." value="${editing?esc(editing.roll):''}" class="border rounded-lg px-3 py-2">
         <input id="sMobile" placeholder="Parent Mobile" value="${editing?esc(editing.mobile):''}" class="border rounded-lg px-3 py-2">
+        <input id="sAdmission" type="date" value="${editing?esc(editing.admissionDate||''):todayISO()}" title="Admission Date (used to track fee dues)" class="border rounded-lg px-3 py-2">
         <input id="sPassword" type="text" placeholder="${editing?'New Parent Password (leave blank to keep)':'Set Parent Login Password'}" class="border rounded-lg px-3 py-2">
       </div>
-      <p class="text-xs text-gray-500 mt-2">Parents log in with this student's Roll No. + Mobile Number + this Password.</p>
+      <p class="text-xs text-gray-500 mt-2">Parents log in with this student's Roll No. + Mobile Number + this Password. Admission date is used to track how many months of fee are due.</p>
       <div class="mt-4 flex gap-2">
         <button onclick="saveStudentForm(${lockedClass?`'${esc(lockedClass)}'`:'null'})" class="navy-btn rounded-lg px-5 py-2 font-bold">${editing?'💾 Update Student':'+ Add Student'}</button>
         ${editing?`<button onclick="cancelEditStudent()" class="bg-gray-200 rounded-lg px-5 py-2 font-bold">Cancel</button>`:''}
@@ -1671,15 +1689,16 @@ function saveStudentForm(lockedClass){
   const section=document.getElementById('sSection').value.trim();
   const roll=document.getElementById('sRoll').value.trim();
   const mobile=document.getElementById('sMobile').value.trim();
+  const admissionDate=document.getElementById('sAdmission').value || todayISO();
   const password=document.getElementById('sPassword').value.trim();
   if(!name||!roll){ alert('Please enter at least student name and roll number.'); return; }
   if(EDITING_STUDENT_ID){
     const s = DB.students.find(x=>x.id===EDITING_STUDENT_ID);
-    if(s) Object.assign(s, {name,father,cls,section,roll,mobile, password: password||s.password});
+    if(s) Object.assign(s, {name,father,cls,section,roll,mobile,admissionDate, password: password||s.password});
     EDITING_STUDENT_ID = null;
   } else {
     if(!password){ alert("Please set a parent login password for this student."); return; }
-    DB.students.push({id:uid(), name, father, cls, section, roll, mobile, password});
+    DB.students.push({id:uid(), name, father, cls, section, roll, mobile, admissionDate, password});
   }
   saveDB(); render();
 }
@@ -2180,6 +2199,113 @@ function renderFeeVoucherCard(student, month){
     </div>
   </div>`;
 }
+/* ============================================================
+   CLASS RANKING — auto-decided from entered marks (reuses the same
+   percentage calculation as the Marksheet, so positions always match).
+   ============================================================ */
+function studentOverallPercent(student){
+  const subs = subjectsForClass(student.cls);
+  const m = DB.marks[student.id] || {};
+  const stage = currentExamStageIndex(student, m);
+  const activeKeys = EXAM_KEYS.slice(0, stage+1);
+  const examMax = EXAM_MAX_EACH * activeKeys.length;
+  let obtained=0, max=0;
+  subs.forEach(sub=>{
+    const rec = m[sub] || {};
+    obtained += activeKeys.reduce((a,k)=>a+(Number(rec[k])||0),0);
+    max += examMax;
+  });
+  return max? (obtained/max*100) : 0;
+}
+function classTopThree(cls){
+  return DB.students.filter(s=>s.cls===cls)
+    .map(s=>({student:s, pct:studentOverallPercent(s)}))
+    .filter(x=>x.pct>0)
+    .sort((a,b)=>b.pct-a.pct)
+    .slice(0,3);
+}
+
+/* ============================================================
+   FEE DUES — running total of paid vs due per student, and how many
+   months they're behind, auto-backfilled from their admission month.
+   ============================================================ */
+function monthsRange(fromDateStr, toMonthKey){
+  let [y,m] = (fromDateStr||'').slice(0,7).split('-').map(Number);
+  const [ty,tm] = toMonthKey.split('-').map(Number);
+  if(!y||!m) return [toMonthKey];
+  const out=[];
+  while(y<ty || (y===ty && m<=tm)){
+    out.push(`${y}-${String(m).padStart(2,'0')}`);
+    m++; if(m>12){ m=1; y++; }
+  }
+  return out;
+}
+function feeSummary(stu){
+  const months = monthsRange(stu.admissionDate || currentMonthKey()+'-01', currentMonthKey());
+  let totalBilled=0, totalPaid=0; const unpaidMonths=[];
+  months.forEach(mo=>{
+    const rec = ensureFeeRecord(stu.id, mo, stu.cls);
+    totalBilled += rec.amount;
+    if(rec.status==='Paid') totalPaid += rec.amount; else unpaidMonths.push(mo);
+  });
+  return {totalBilled, totalPaid, totalDue: totalBilled-totalPaid, unpaidMonths, unpaidCount: unpaidMonths.length};
+}
+
+function hmDashboard(){
+  const totalStudents = DB.students.length;
+  const totalTeachers = DB.teachers.length;
+  const totalClasses = DB.config.classes.length;
+  const today = todayISO();
+  const todaysAtt = DB.attendance[today] || {};
+  const presentToday = Object.values(todaysAtt).filter(v=>v==='P').length;
+  const attPct = totalStudents? Math.round(presentToday/totalStudents*100) : 0;
+  const cm = currentMonthKey();
+  let pendingCount=0, pendingAmount=0;
+  DB.students.forEach(s=>{
+    const rec = ensureFeeRecord(s.id, cm, s.cls);
+    if(rec.status!=='Paid'){ pendingCount++; pendingAmount+=rec.amount; }
+  });
+  saveDB();
+  const upcomingAnn = allAnnouncements('all').filter(a=>a.date>=today).slice(0,4);
+  const cls = document.getElementById('dashClassSel')?.value || DB.config.classes[0];
+  const top3 = classTopThree(cls);
+  const medal = ['🥇','🥈','🥉'];
+  const medalBg = ['#f0a500','#9ca3af','#b45309'];
+
+  return `
+  <div class="space-y-5">
+    <div class="grid sm:grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="doc-frame p-4 text-center"><div class="text-3xl font-bold text-[var(--navy)]">${totalStudents}</div><div class="text-xs text-gray-500 mt-1">🎒 Total Students</div></div>
+      <div class="doc-frame p-4 text-center"><div class="text-3xl font-bold text-[var(--navy)]">${totalTeachers}</div><div class="text-xs text-gray-500 mt-1">👩‍🏫 Total Teachers</div></div>
+      <div class="doc-frame p-4 text-center"><div class="text-3xl font-bold text-[var(--navy)]">${totalClasses}</div><div class="text-xs text-gray-500 mt-1">🏫 Total Classes</div></div>
+      <div class="doc-frame p-4 text-center"><div class="text-3xl font-bold ${pendingCount?'text-red-600':'text-green-600'}">${pendingCount}</div><div class="text-xs text-gray-500 mt-1">💰 Pending This Month ${pendingCount?`(Rs. ${pendingAmount})`:''}</div></div>
+    </div>
+    ${card(`
+      <h2 class="text-xl font-bold text-[var(--navy)] mb-3">📊 Today's Attendance</h2>
+      <div class="flex items-center gap-4 flex-wrap">
+        <div class="text-4xl font-bold text-[var(--navy)]">${attPct}%</div>
+        <div class="text-sm text-gray-500">${presentToday} / ${totalStudents} students marked present today across all classes.</div>
+      </div>
+    `)}
+    ${card(`
+      <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+        <h2 class="text-xl font-bold text-[var(--navy)]">🏆 Class Toppers</h2>
+        <select id="dashClassSel" onchange="render()" class="border rounded-lg px-3 py-2 text-sm">${DB.config.classes.map(c=>`<option ${c===cls?'selected':''}>${esc(c)}</option>`).join('')}</select>
+      </div>
+      ${top3.length? `<div class="grid sm:grid-cols-3 gap-3">${top3.map((t,i)=>`
+        <div class="ann-card">
+          <div class="ann-date-box" style="background:${medalBg[i]};"><div class="d">${medal[i]}</div><div class="m">${i+1}${i===0?'ST':i===1?'ND':'RD'}</div></div>
+          <div class="flex-1 min-w-0"><div class="font-bold text-[var(--navy)]">${esc(t.student.name)}</div><div class="text-xs text-gray-500">Roll ${esc(t.student.roll)}</div><div class="text-sm font-bold mt-1">${t.pct.toFixed(2)}%</div></div>
+        </div>`).join('')}</div>` : `<p class="text-gray-400 text-sm">No marks entered yet for Class ${esc(cls)}.</p>`}
+    `)}
+    ${card(`
+      <h2 class="text-xl font-bold text-[var(--navy)] mb-3">📣 Upcoming</h2>
+      ${upcomingAnn.length? `<div class="space-y-2">${upcomingAnn.map(a=>`<div class="ann-card">${annDateBox(a.date)}<div class="flex-1 min-w-0"><div class="font-bold text-[var(--navy)]">${esc(a.title)}</div><div class="text-xs text-gray-500">${esc(a.short)}</div></div></div>`).join('')}</div>` : '<p class="text-gray-400 text-sm">Nothing scheduled.</p>'}
+    `)}
+  </div>`;
+}
+
+
 function hmFees(){
   const cls = document.getElementById('feeClassSel')?.value || DB.config.classes[0];
   const month = document.getElementById('feeMonthSel')?.value || currentMonthKey();
@@ -2196,6 +2322,19 @@ function hmFees(){
       <td><button onclick="viewFeeVoucher('${s.id}','${month}')" class="text-[var(--navy)] text-sm font-bold">🧾 Voucher</button></td>
     </tr>`;
   }).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
+  const duesRows = students.map(s=>{
+    const sum = feeSummary(s);
+    const badge = sum.unpaidCount>=3 ? `<span class="ann-badge bg-red-100 text-red-700">⚠️ ${sum.unpaidCount} months overdue</span>`
+                : sum.unpaidCount>=1 ? `<span class="ann-badge bg-amber-100 text-amber-700">${sum.unpaidCount} month${sum.unpaidCount>1?'s':''} due</span>`
+                : `<span class="ann-badge bg-green-100 text-green-700">✅ Up to date</span>`;
+    return `<tr class="border-b">
+      <td class="py-2">${esc(s.roll)}</td><td>${esc(s.name)}</td>
+      <td class="text-green-700 font-bold">Rs. ${sum.totalPaid}</td>
+      <td class="${sum.totalDue>0?'text-red-600':'text-gray-400'} font-bold">Rs. ${sum.totalDue}</td>
+      <td>${badge}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
+  saveDB();
   return `
   <div class="space-y-5">
     ${card(`
@@ -2219,6 +2358,16 @@ function hmFees(){
       </table>
       </div>
     `)}
+    ${card(`
+      <h2 class="text-xl font-bold text-[var(--navy)] mb-4">📋 Fee Dues Summary — Class ${esc(cls)}</h2>
+      <p class="text-xs text-gray-500 mb-3">Running total since each student's admission date — flags students who are 2+ months behind.</p>
+      <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>Total Paid</th><th>Total Due</th><th>Status</th></tr></thead>
+        <tbody>${duesRows}</tbody>
+      </table>
+      </div>
+    `)}
     <div id="feeVoucherPreview"></div>
   </div>`;
 }
@@ -2230,6 +2379,7 @@ function viewFeeVoucher(studentId, month){
 function renderParentFees(stu){
   const cm = currentMonthKey();
   if(!DB.fees[stu.id] || !DB.fees[stu.id][cm]){ ensureFeeRecord(stu.id, cm, stu.cls); saveDB(); }
+  const sum = feeSummary(stu);
   const months = Object.keys(DB.fees[stu.id]||{}).sort().reverse();
   const rows = months.map(m=>{
     const rec = DB.fees[stu.id][m];
@@ -2238,7 +2388,13 @@ function renderParentFees(stu){
       <td><button onclick="viewFeeVoucher('${stu.id}','${m}')" class="text-[var(--navy)] text-sm font-bold">🧾 Voucher</button></td></tr>`;
   }).join('') || `<tr><td colspan="4" class="text-center text-gray-400 py-4">No fee records yet.</td></tr>`;
   return `${card(`
-    <h2 class="text-xl font-bold text-[var(--navy)] mb-4">💰 Fee History</h2>
+    <h2 class="text-xl font-bold text-[var(--navy)] mb-3">💰 Fee Summary</h2>
+    <div class="grid sm:grid-cols-3 gap-3 mb-4">
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Paid</div><div class="text-xl font-bold text-green-600">Rs. ${sum.totalPaid}</div></div>
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Due</div><div class="text-xl font-bold ${sum.totalDue>0?'text-red-600':'text-green-600'}">Rs. ${sum.totalDue}</div></div>
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Status</div><div class="text-sm font-bold mt-1">${sum.unpaidCount>=3?`⚠️ ${sum.unpaidCount} months overdue`:sum.unpaidCount>=1?`${sum.unpaidCount} month${sum.unpaidCount>1?'s':''} due`:'✅ Up to date'}</div></div>
+    </div>
+    <h3 class="font-bold text-[var(--navy)] mb-2">Month-by-Month</h3>
     <div class="overflow-x-auto">
     <table class="w-full text-sm">
       <thead><tr class="text-left border-b"><th class="py-2">Month</th><th>Amount</th><th>Status</th><th>Voucher</th></tr></thead>
