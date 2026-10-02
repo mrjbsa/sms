@@ -780,34 +780,19 @@ function renderMarksheetCard(student, marksData, yearLabel){
 
 /* ============================================================
    PRINT + SAVE-AS-JPG ENGINE
-   - Marksheet / Timetable / Fee Voucher: exactly one A4 sheet
-     (210 x 297 mm), same design as the on-screen card, scaled to
-     fill the page edge-to-edge.
-   - ID Card: exactly 85.6 x 54 mm (credit-card size).
-   - "Save JPG" produces the very same picture as a high-res image.
-   The sheet is laid out ONCE here in the main page (where all styles are
+   - Marksheet / Timetable / Fee Voucher: printed on a real A4 page
+     (210 x 297 mm) at the card's own natural size — same design as
+     on screen, never stretched or distorted, just placed on an A4
+     sheet with a normal margin.
+   - ID Card: its own exact 85.6 x 54 mm (credit-card) page.
+   - "Save JPG" renders that exact same card at high resolution.
+   The card is built ONCE here in the main page (where all styles are
    already loaded and stable) and the finished result is handed to the
    print window / image renderer, so both always look identical.
    ============================================================ */
 const CARD_BASE_W = {marksheetCard:620, timetableCard:480, feeVoucherCard:480};
 const CARD_LABEL  = {marksheetCard:'Marksheet', timetableCard:'Timetable', feeVoucherCard:'Fee-Voucher', idCard:'ID-Card'};
 
-/* Stretches the .doc-frame to the A4 proportion, then scales it to fill the sheet. */
-function fitToA4(sheet){
-  const f = sheet.querySelector('.doc-frame'); if(!f) return;
-  const SW=793.7, SH=1122.52, R=SH/SW;
-  let W = parseFloat(sheet.getAttribute('data-w'))||520;
-  for(let i=0;i<14;i++){ f.style.width=W+'px'; f.style.height='auto'; const need=f.offsetHeight/R; if(need<=W+0.5) break; W=need; }
-  /* safety pass: never let real content be taller than the forced box — that would
-     silently clip the bottom (e.g. the footer); a little blank space is the safe
-     direction to err in instead. */
-  f.style.width = W+'px'; f.style.height='auto';
-  const finalNeed = f.offsetHeight/R;
-  if(finalNeed > W) W = finalNeed;
-  f.style.width = W+'px';
-  f.style.height = (W*R)+'px';
-  f.style.transform = 'scale('+(SW/W)+')';
-}
 /* Print / image copy of a card: no editable inputs (they cut text off), no duplicate id. */
 function staticCardHtml(el){
   const c = el.cloneNode(true);
@@ -823,7 +808,9 @@ function staticCardHtml(el){
   return c.outerHTML;
 }
 const wait = ms => new Promise(r=>setTimeout(r,ms));
-/* Builds the finished (fitted) sheet inside a hidden host in the main page. */
+/* Builds a plain, undistorted copy of the card at its own natural size — this is
+   handed to BOTH the print window and the JPG renderer, so what you print/save is
+   always exactly what was on screen, just placed on a real A4 (or card-size) page. */
 async function buildSheet(id){
   const el = document.getElementById(id); if(!el) return null;
   const host = document.createElement('div');
@@ -834,12 +821,16 @@ async function buildSheet(id){
     await wait(60);
     return {host, node: host.firstElementChild, w:323.5, h:204.1, isId:true};
   }
-  host.innerHTML = `<div class="a4-sheet" data-w="${CARD_BASE_W[id]||520}">${staticCardHtml(el)}</div>`;
+  const w = CARD_BASE_W[id] || 620;
+  host.innerHTML = staticCardHtml(el);
   document.body.appendChild(host);
+  const node = host.firstElementChild;
+  node.style.maxWidth = 'none';
+  node.style.width = w+'px';
+  node.style.margin = '0';
   await wait(150);                       // let Tailwind generate CSS for the cloned markup
-  const sheet = host.firstElementChild;
-  fitToA4(sheet);
-  return {host, node: sheet, w:793.7, h:1122.52, isId:false};
+  const h = node.offsetHeight;
+  return {host, node, w, h, isId:false};
 }
 /* Every style rule currently on the page (Tailwind + style.css) as one string. */
 function collectPageCss(){
@@ -858,21 +849,21 @@ async function printEl(id){
   let built;
   try{ built = await buildSheet(id); }catch(e){ w.close(); alert('Could not prepare the print view: '+e.message); return; }
   if(!built){ w.close(); return; }
-  const html = built.isId ? built.node.outerHTML : built.node.outerHTML;
+  const html = built.node.outerHTML;
   built.host.remove();
-  const page = built.isId ? '85.6mm 54mm' : '210mm 297mm';
-  const size = built.isId ? 'width:85.6mm;height:54mm;' : 'width:210mm;height:297mm;';
+  const page = built.isId ? '85.6mm 54mm' : 'A4';
+  const margin = built.isId ? '0' : '12mm';
   w.document.open();
   w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${CARD_LABEL[id]||'Print'}</title>
     <style>${collectPageCss()}</style>
     <style>
-      @page{ size:${page}; margin:0; }
+      @page{ size:${page}; margin:${margin}; }
       html,body{ margin:0; padding:0; background:#fff; }
-      .sheet-wrap{ ${size} overflow:hidden; }
+      body{ display:flex; justify-content:center; ${built.isId?'align-items:center; min-height:100vh;':'align-items:flex-start;'} }
       *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
-      @media print{ .a4-sheet{ height:296.8mm; } .no-print{ display:none !important; } }
+      @media print{ .no-print{ display:none !important; } }
       .pre-print-banner{
-        position:sticky; top:0; z-index:9; background:#0b1a4a; color:#fff;
+        position:fixed; top:0; left:0; right:0; z-index:9; background:#0b1a4a; color:#fff;
         font-family:'Trebuchet MS',sans-serif; padding:10px 16px; display:flex;
         align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
       }
@@ -883,10 +874,11 @@ async function printEl(id){
       }
     </style></head><body>
     <div class="pre-print-banner no-print">
-      <span>Before printing, set <b>Paper size = ${built.isId?'the custom 85.6×54mm size (or "Card")':'A4'}</b>, <b>Margins = None</b>, <b>Scale = 100%</b> in the dialog that opens.</span>
+      <span>Before printing: <b>Paper size = ${built.isId?'smallest/Custom (85.6×54mm)':'A4'}</b>, <b>Margins = None</b>, <b>Scale = 100%</b>.</span>
       <button onclick="window.print()">🖨️ Print Now</button>
     </div>
-    <div class="sheet-wrap">${html}</div>
+    <div class="no-print" style="height:52px;"></div>
+    ${html}
     </body></html>`);
   w.document.close();
 }

@@ -118,18 +118,10 @@
   ::-webkit-scrollbar{ width:8px; height:8px; }
   ::-webkit-scrollbar-thumb{ background:#c7cbe0; border-radius:4px; }
 
-  /* ---------- A4 sheet used for printing and "Save JPG" ----------
-     One sheet = exactly 210 x 297 mm. The card inside is stretched to the
-     A4 proportion and scaled (by script.js -> fitToA4) to fill it edge to edge. */
-  .a4-sheet{ width:210mm; height:297mm; overflow:hidden; position:relative; background:#fff; }
-  .a4-sheet .doc-frame{
-    display:flex; flex-direction:column;
-    position:absolute; left:0; top:0;
-    max-width:none !important; margin:0 !important;
-    border:none !important; border-radius:0 !important; box-shadow:none !important;
-    transform-origin:top left;
-  }
-  .a4-sheet .doc-frame .doc-footer{ margin-top:auto; }
+  /* ---------- Printing ----------
+     script.js (printEl) opens a popup sized to a real A4 (or 85.6x54mm ID
+     card) page and places the card at its own natural size on it — no
+     stretching, so the printed design always matches what's on screen. */
   @media print{
     .no-print{ display:none !important; }
     *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
