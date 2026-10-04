@@ -1567,6 +1567,7 @@ function hmTeachers(){
       <td>${accessBadge}</td>
       <td class="whitespace-nowrap">
         <button onclick="resetTeacherPass('${t.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">🔑 Password</button>
+        <button onclick="editTeacherSalaryInfo('${t.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">🧾 Join/Salary</button>
         ${t.drivePermissionId
           ? `<button onclick="driveRevokeTeacherAccess('${t.id}')" class="text-red-600 text-sm font-bold mr-2">🚫 Revoke Drive Access</button>`
           : `<button onclick="driveGrantTeacherAccess('${t.id}')" class="text-green-700 text-sm font-bold mr-2">🔓 Grant Drive Access</button>`}
@@ -1617,6 +1618,16 @@ function addTeacher(){
   } else finish(null);
 }
 function delTeacher(id){ if(confirm('Remove this teacher?')){ DB.teachers = DB.teachers.filter(t=>t.id!==id); saveDB(); render(); } }
+function editTeacherSalaryInfo(id){
+  const t = DB.teachers.find(x=>x.id===id); if(!t) return;
+  const jd = prompt(`Join Date for ${t.name} (YYYY-MM-DD) — used to track how many months of salary are due:`, t.joinDate || schoolYearStart());
+  if(jd===null) return;
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(jd)){ alert('Please enter the date as YYYY-MM-DD.'); return; }
+  const sal = prompt(`Monthly Salary for ${t.name} (Rs.):`, t.salary||0);
+  if(sal===null) return;
+  t.joinDate = jd; t.salary = Number(sal)||0;
+  saveDB(); render();
+}
 function resetTeacherPass(id){
   const t = DB.teachers.find(x=>x.id===id); if(!t) return;
   const np = prompt(`Set a new login password for ${t.name}:`, '');
@@ -2383,8 +2394,16 @@ function nextMonthDue(monthKey, day){
   m++; if(m>12){ m=1; y++; }
   return `${y}-${String(m).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
 }
+/* Students/teachers added before this tracking feature existed have no
+   admission/join date on record — defaulting those to "today" would hide
+   every month they actually owe, so fall back to the start of the current
+   academic year instead (editable per-person any time from Students/Teachers). */
+function schoolYearStart(){
+  const y = parseInt((DB.config.year||'').slice(0,4),10);
+  return y ? `${y}-04-01` : currentMonthKey()+'-01';
+}
 function feeSummary(stu){
-  const months = monthsRange(stu.admissionDate || currentMonthKey()+'-01', currentMonthKey());
+  const months = monthsRange(stu.admissionDate || schoolYearStart(), currentMonthKey());
   let totalBilled=0, totalPaid=0; const unpaidMonths=[];
   months.forEach(mo=>{
     const rec = ensureFeeRecord(stu.id, mo, stu.cls);
@@ -2484,7 +2503,7 @@ function ensureSalaryRecord(teacherId, month, defaultAmount){
 function setSalaryAmount(teacherId,month,val){ const rec=ensureSalaryRecord(teacherId,month,0); rec.amount=Number(val)||0; saveDB(); render(); }
 function setSalaryStatus(teacherId,month,status){ const t=DB.teachers.find(x=>x.id===teacherId); const rec=ensureSalaryRecord(teacherId,month,t?t.salary:0); rec.status=status; rec.paidOn = status==='Paid'?todayISO():null; saveDB(); render(); }
 function salarySummary(t){
-  const months = monthsRange(t.joinDate || currentMonthKey()+'-01', currentMonthKey());
+  const months = monthsRange(t.joinDate || schoolYearStart(), currentMonthKey());
   let totalBilled=0, totalPaid=0; const unpaidMonths=[];
   months.forEach(mo=>{
     const rec = ensureSalaryRecord(t.id, mo, t.salary);
