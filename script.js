@@ -63,6 +63,7 @@ function defaultDB(){
     marks:{},      // studentId -> { subject: {pt1,pt2,mid,final} } (null = not entered yet)
     announcements:[], // {id,title,date,category,audience,short,detail} — Headmaster-authored; Pakistan's fixed holidays are added automatically, not stored here
     fees:{},       // studentId -> { 'YYYY-MM': {amount,status:'Paid'/'Unpaid',paidOn} }
+    salaries:{},   // teacherId -> { 'YYYY-MM': {amount,status:'Paid'/'Unpaid',paidOn} } — same pattern as fees
     homework:[]    // {id,cls,subject,title,description,dateAssigned,dueDate,teacherId}
   };
 }
@@ -132,41 +133,81 @@ function copyShareLink(){
    ------------------------------------------------------------
    Optional, off by default. If MASTER_REGISTRY_FILE_ID is left blank,
    every school works exactly as before with no approval step.
-   Once the owner creates a registry (via the "⚙️ Platform Admin" link
-   on the login screen, using OWNER_GMAIL) and pastes its file ID
-   below, every NEW school that connects Google Drive here must be
-   approved before its dashboard opens:
+   Once the owner creates a registry (via the hidden Platform Admin
+   panel — click the login card's footer 5 times) and pastes its file
+   ID below, every NEW school that connects Google Drive here must be
+   approved (with a plan + expiry date) before its dashboard opens:
      • not listed / "pending" -> "Awaiting Approval" screen
      • "denied"               -> paid-service contact screen
-     • "approved"             -> normal access
+     • "approved" + not expired -> normal access
+     • "approved" + expiry date has passed -> treated as "expired",
+       same contact screen with a renewal-specific message
    The registry itself is a small JSON file in the owner's OWN Drive,
    shared as "Anyone with the link — Viewer" so every school's device
    can read its own status with no sign-in. Only the owner's Google
    account can ever WRITE to it — Google Drive enforces that on its
-   own, so nobody can self-approve.
+   own, so nobody can self-approve. Expiry is checked client-side by
+   comparing today's date to the stored expiryDate — nothing needs to
+   "run" on a server for a plan to lapse.
    ============================================================ */
 const OWNER_GMAIL = 'mrjbsa.313@gmail.com';           // the Google account that unlocks the Platform Admin panel
-const OWNER_CONTACT_EMAIL = 'mrjbsa.official@outlook.com'; // shown to schools that are denied / still pending
+const OWNER_CONTACT_EMAIL = 'mrjbsa.official@outlook.com'; // shown to schools that are denied / expired / still pending
 const MASTER_REGISTRY_FILE_ID = '1k4GUW-UpL1UHIycxXajWsV3attplEdto';                        // paste the registry file's ID here once created — leave blank to disable the gate entirely
+const ADMIN_USERNAME = 'Mr JB';            // second factor, asked AFTER the OWNER_GMAIL Google sign-in succeeds
+const ADMIN_PASSWORD = '#Mr.s@.JB3!3';
 
-let APPROVAL_STATE = {status:'unknown', checkedAt:null}; // 'unknown' | 'approved' | 'pending' | 'denied'
+/* Plan catalog — "price" is just a suggested amount shown when approving;
+   the admin can edit it per school (discounts, negotiated deals, etc.)
+   before approving, and whatever is entered is what counts as income. */
+const PLAN_OPTIONS = [
+  {key:'trial', label:'Free Trial — 1 Month', months:1,  price:0},
+  {key:'m1',    label:'1 Month',              months:1,  price:2000},
+  {key:'m2',    label:'2 Months',             months:2,  price:3800},
+  {key:'m3',    label:'3 Months',             months:3,  price:5500},
+  {key:'m4',    label:'4 Months',             months:4,  price:7200},
+  {key:'m5',    label:'5 Months',             months:5,  price:8800},
+  {key:'m6',    label:'6 Months',             months:6,  price:10500},
+  {key:'y1',    label:'1 Year',               months:12, price:18000},
+  {key:'lifetime', label:'Lifetime',          months:null, price:40000},
+];
+function planByKey(key){ return PLAN_OPTIONS.find(p=>p.key===key) || PLAN_OPTIONS[0]; }
+function computeExpiry(startDateStr, planKey){
+  const plan = planByKey(planKey);
+  if(!plan.months) return null; // lifetime — never expires
+  const d = new Date(startDateStr+'T00:00:00');
+  d.setMonth(d.getMonth()+plan.months);
+  return d.toISOString().slice(0,10);
+}
+/* The stored status plus a live expiry check — this is what actually decides
+   access, so a plan "auto-denies" the moment its date passes, with nothing
+   needing to run on a schedule anywhere. */
+function effectiveStatus(entry){
+  if(!entry) return 'pending';
+  if(entry.status==='approved' && entry.expiryDate && entry.expiryDate < todayISO()) return 'expired';
+  return entry.status || 'pending';
+}
+
+let APPROVAL_STATE = {status:'unknown', entry:null, checkedAt:null}; // status: 'unknown'|'approved'|'pending'|'denied'|'expired'
 let adminTokenClient=null, adminAccessToken=null, adminConnectedEmail=null, adminRegistry=null;
+let ADMIN_GOOGLE_OK=false; // true once OWNER_GMAIL has signed in; still needs username+password after this
+let REQUESTED_PLAN='trial';
+function setRequestedPlan(v){ REQUESTED_PLAN=v; }
 
 function registryConfigured(){ return !!(MASTER_REGISTRY_FILE_ID && !MASTER_REGISTRY_FILE_ID.includes('PASTE')); }
 function refreshApprovalStatus(){
-  if(!registryConfigured() || !DRIVE_FILE_ID){ APPROVAL_STATE={status:'approved', checkedAt:new Date()}; return Promise.resolve(); }
+  if(!registryConfigured() || !DRIVE_FILE_ID){ APPROVAL_STATE={status:'approved', entry:null, checkedAt:new Date()}; return Promise.resolve(); }
   return fetch(`https://www.googleapis.com/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`)
     .then(r=>{ if(!r.ok) throw new Error('registry fetch failed'); return r.json(); })
     .then(reg=>{
-      const entry = (reg.schools||{})[DRIVE_FILE_ID];
-      APPROVAL_STATE = {status: entry ? entry.status : 'pending', checkedAt:new Date()};
+      const entry = (reg.schools||{})[DRIVE_FILE_ID] || null;
+      APPROVAL_STATE = {status: effectiveStatus(entry), entry, checkedAt:new Date()};
     })
-    .catch(()=>{ if(APPROVAL_STATE.status==='unknown') APPROVAL_STATE={status:'pending', checkedAt:new Date()}; });
+    .catch(()=>{ if(APPROVAL_STATE.status==='unknown') APPROVAL_STATE={status:'pending', entry:null, checkedAt:new Date()}; });
 }
 function checkApprovalStatus(){ refreshApprovalStatus().then(render); }
 const OWNER_WHATSAPP = ''; // optional: your WhatsApp number with country code, digits only (e.g. 923001234567) — if blank, WhatsApp opens its normal "choose a contact" screen
 function approvalRequestText(schoolName, gmail){
-  return `New School Registration\n\nSchool Name: ${schoolName}\nHeadmaster Gmail: ${gmail||'(not set)'}\nSchool File ID: ${DRIVE_FILE_ID}`;
+  return `New School Registration\n\nSchool Name: ${schoolName}\nHeadmaster Gmail: ${gmail||'(not set)'}\nSchool File ID: ${DRIVE_FILE_ID}\nRequested Plan: ${planByKey(REQUESTED_PLAN).label}`;
 }
 function approvalRequestLinks(schoolName, gmail){
   const text = approvalRequestText(schoolName, gmail);
@@ -200,6 +241,23 @@ function renderApprovalGate(){
       </div>
     </div>`;
   }
+  if(APPROVAL_STATE.status==='expired'){
+    const e = APPROVAL_STATE.entry||{};
+    return `
+    <div class="min-h-screen flex items-center justify-center p-4">
+      <div class="w-full max-w-md doc-frame">
+        <div class="doc-topbar"></div>
+        <div class="doc-arc"><div class="doc-shield">⌛</div><div class="doc-title" style="font-size:1.3rem;">Subscription Expired</div></div>
+        <div class="p-6 text-center space-y-3">
+          <p class="text-gray-700">Your <b>${esc(e.planLabel||'plan')}</b> expired on <b>${esc(e.expiryDate||'')}</b>. Please renew to continue using the dashboard.</p>
+          <p class="font-bold text-[var(--navy)]">📧 ${esc(OWNER_CONTACT_EMAIL)}</p>
+          <button onclick="checkApprovalStatus()" class="gold-btn rounded-lg px-5 py-2 font-bold mt-2">🔄 Check Status</button>
+          <button onclick="logout()" class="bg-gray-200 rounded-lg px-5 py-2 font-bold mt-2 block mx-auto">⬅️ Back to Login</button>
+        </div>
+        <div class="doc-footer"><span class="lead">Learn Today</span><span class="lead2">Lead Tomorrow</span></div>
+      </div>
+    </div>`;
+  }
   const hm = DB.config.headmasterAccount || {};
   const links = approvalRequestLinks(DB.config.schoolName||'My School', hm.gmail||driveConnectedEmail||'');
   return `
@@ -208,7 +266,13 @@ function renderApprovalGate(){
       <div class="doc-topbar"></div>
       <div class="doc-arc"><div class="doc-shield">⏳</div><div class="doc-title" style="font-size:1.3rem;">Awaiting Approval</div></div>
       <div class="p-6 text-center space-y-3">
-        <p class="text-gray-700">This school's registration needs to be approved before the dashboard opens. Send your request if you haven't already:</p>
+        <p class="text-gray-700">This school's registration needs to be approved before the dashboard opens.</p>
+        <div class="text-left">
+          <label class="block text-xs font-bold text-gray-500 mb-1">Plan you'd like</label>
+          <select onchange="setRequestedPlan(this.value)" class="w-full border rounded-lg px-3 py-2 text-sm">
+            ${PLAN_OPTIONS.map(p=>`<option value="${p.key}" ${p.key===REQUESTED_PLAN?'selected':''}>${p.label}${p.price?` — Rs. ${p.price}`:''}</option>`).join('')}
+          </select>
+        </div>
         <div class="flex flex-col gap-2">
           <a href="${links.gmail}" target="_blank" rel="noopener" class="navy-btn rounded-lg px-5 py-2 font-bold">📧 Send Request via Gmail</a>
           <a href="${links.wa}" target="_blank" rel="noopener" class="bg-green-600 text-white rounded-lg px-5 py-2 font-bold">💬 Send Request on WhatsApp</a>
@@ -224,7 +288,9 @@ function renderApprovalGate(){
   </div>`;
 }
 
-/* ---------- Platform Admin (owner-only) ---------- */
+/* ---------- Platform Admin (owner-only, hidden) ----------
+   Reached only by clicking the login card's footer 5 times, then signing in
+   with BOTH the OWNER_GMAIL Google account AND the fixed username/password. */
 function adminInitTokenClient(){
   if(adminTokenClient || !window.google || !google.accounts) return;
   adminTokenClient = google.accounts.oauth2.initTokenClient({
@@ -241,10 +307,8 @@ function adminInitTokenClient(){
             alert(`This Google account is not authorised as the Platform Admin.\n\nYou signed in as: ${p.email}\nExpected admin account: ${OWNER_GMAIL}\n\nPlease try again and choose the correct Google account.`);
             adminAccessToken=null; adminConnectedEmail=null; return;
           }
-          SESSION = {role:'superadmin'};
-          sessionStorage.setItem('bfhs_session', JSON.stringify(SESSION));
-          alert(`Signed in as Platform Admin (${p.email}).`);
-          if(registryConfigured()) adminLoadRegistry().then(render); else render();
+          ADMIN_GOOGLE_OK = true;
+          render(); // shows the username/password screen next
         })
         .catch(e=>alert('Platform Admin sign-in failed: '+e.message));
     }
@@ -255,6 +319,32 @@ function adminConnect(){
   adminInitTokenClient();
   if(!adminTokenClient){ alert('Still loading Google sign-in — please try again in a moment.'); return; }
   adminTokenClient.requestAccessToken({prompt:'select_account'});
+}
+function adminCredLogin(){
+  const u = document.getElementById('adminUser').value;
+  const p = document.getElementById('adminPass').value;
+  if(u===ADMIN_USERNAME && p===ADMIN_PASSWORD){
+    SESSION = {role:'superadmin'};
+    sessionStorage.setItem('bfhs_session', JSON.stringify(SESSION));
+    if(registryConfigured()) adminLoadRegistry().then(render); else render();
+  } else {
+    alert('Incorrect username or password.');
+  }
+}
+function renderAdminCredLogin(){
+  document.getElementById('app').innerHTML = `<div class="min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-sm doc-frame">
+      <div class="doc-topbar"></div>
+      <div class="doc-arc"><div class="doc-shield">🔐</div><div class="doc-title" style="font-size:1.2rem;">Admin Login</div><div class="doc-subtitle">Signed in as ${esc(adminConnectedEmail||'')}</div></div>
+      <div class="p-6 space-y-3">
+        <input id="adminUser" placeholder="Username" class="w-full border rounded-lg px-3 py-2" autocomplete="off">
+        <input id="adminPass" type="password" placeholder="Password" class="w-full border rounded-lg px-3 py-2">
+        <button onclick="adminCredLogin()" class="w-full navy-btn rounded-lg py-2.5 font-bold">Login</button>
+        <button onclick="ADMIN_GOOGLE_OK=false; logout();" class="w-full text-sm text-gray-500 underline">Cancel</button>
+      </div>
+      <div class="doc-footer"><span class="lead">Learn Today</span><span class="lead2">Lead Tomorrow</span></div>
+    </div>
+  </div>`;
 }
 function adminLoadRegistry(){
   return fetch(`https://www.googleapis.com/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?alt=media`,{headers:{Authorization:'Bearer '+adminAccessToken}})
@@ -287,20 +377,36 @@ function adminCreateRegistry(){
     });
   }).catch(e=>alert('Could not create the registry file: '+e.message));
 }
-function adminSetStatus(fileId, status){
+function adminApproveSchool(fileId){
+  const planSel = document.getElementById('plan_'+fileId);
+  const amtInput = document.getElementById('amt_'+fileId);
+  const planKey = planSel ? planSel.value : 'trial';
+  const amount = amtInput ? (Number(amtInput.value)||0) : 0;
   if(!adminRegistry) adminRegistry={schools:{}};
   if(!adminRegistry.schools[fileId]) adminRegistry.schools[fileId] = {name:'(manually added)', gmail:'', requestedAt:new Date().toISOString()};
-  adminRegistry.schools[fileId].status = status;
-  adminRegistry.schools[fileId].decidedAt = new Date().toISOString();
+  const start = todayISO();
+  Object.assign(adminRegistry.schools[fileId], {
+    status:'approved', plan:planKey, planLabel:planByKey(planKey).label,
+    amount, startDate:start, expiryDate:computeExpiry(start, planKey),
+    decidedAt:new Date().toISOString()
+  });
+  adminSaveRegistry().then(()=>render());
+}
+function adminDenySchool(fileId){
+  if(!adminRegistry) adminRegistry={schools:{}};
+  if(!adminRegistry.schools[fileId]) adminRegistry.schools[fileId] = {name:'(manually added)', gmail:'', requestedAt:new Date().toISOString()};
+  adminRegistry.schools[fileId].status='denied';
+  adminRegistry.schools[fileId].decidedAt=new Date().toISOString();
   adminSaveRegistry().then(()=>render());
 }
 function adminAddSchool(){
   const fileId = document.getElementById('adminFileId').value.trim();
   const name = document.getElementById('adminSchoolName').value.trim();
   const gmail = document.getElementById('adminSchoolGmail').value.trim();
+  const planKey = document.getElementById('adminSchoolPlan').value;
   if(!fileId){ alert("Paste the school's File ID (from their request email/WhatsApp message)."); return; }
   if(!adminRegistry) adminRegistry={schools:{}};
-  adminRegistry.schools[fileId] = {name:name||'(unnamed)', gmail, status:'pending', requestedAt:new Date().toISOString()};
+  adminRegistry.schools[fileId] = {name:name||'(unnamed)', gmail, status:'pending', plan:planKey, planLabel:planByKey(planKey).label, requestedAt:new Date().toISOString()};
   adminSaveRegistry().then(()=>render());
 }
 function renderSuperAdmin(){
@@ -314,33 +420,65 @@ function renderSuperAdmin(){
     return;
   }
   const schools = (adminRegistry && adminRegistry.schools) || {};
-  const rows = Object.entries(schools).sort((a,b)=>(b[1].requestedAt||'').localeCompare(a[1].requestedAt||'')).map(([fid,s])=>`
-    <tr class="border-b">
+  const entries = Object.entries(schools);
+  const totalSchools = entries.length;
+  const totalIncome = entries.reduce((sum,[,s])=>sum+(Number(s.amount)||0),0);
+  const activeCount = entries.filter(([,s])=>effectiveStatus(s)==='approved').length;
+  const expiredCount = entries.filter(([,s])=>effectiveStatus(s)==='expired').length;
+  const pendingCount = entries.filter(([,s])=>effectiveStatus(s)==='pending').length;
+  const today = todayISO();
+  const rows = entries.sort((a,b)=>(b[1].requestedAt||'').localeCompare(a[1].requestedAt||'')).map(([fid,s])=>{
+    const eff = effectiveStatus(s);
+    let expiryLabel = '—';
+    if(s.status==='approved'){
+      if(!s.expiryDate) expiryLabel = 'Lifetime';
+      else{
+        const daysLeft = Math.ceil((new Date(s.expiryDate+'T00:00:00') - new Date(today+'T00:00:00'))/86400000);
+        expiryLabel = eff==='expired' ? `Expired ${s.expiryDate}` : `${s.expiryDate} (${daysLeft}d left)`;
+      }
+    }
+    const statusColor = eff==='approved'?'text-green-600':eff==='expired'?'text-amber-600':eff==='denied'?'text-red-600':'text-gray-500';
+    return `
+    <tr class="border-b align-top">
       <td class="py-2 text-xs">${esc(s.name||'-')}</td>
       <td class="text-xs">${esc(s.gmail||'-')}</td>
-      <td class="text-xs font-mono">${esc(String(fid).slice(0,14))}…</td>
-      <td class="text-xs font-bold ${s.status==='approved'?'text-green-600':s.status==='denied'?'text-red-600':'text-amber-600'}">${esc(s.status||'pending')}</td>
-      <td class="whitespace-nowrap">
-        <button onclick="adminSetStatus('${fid}','approved')" class="px-3 py-1 rounded-lg text-xs font-bold mr-1 ${s.status==='approved'?'bg-green-600 text-white':'bg-gray-100'}">Approve</button>
-        <button onclick="adminSetStatus('${fid}','denied')" class="px-3 py-1 rounded-lg text-xs font-bold ${s.status==='denied'?'bg-red-600 text-white':'bg-gray-100'}">Deny</button>
+      <td class="text-xs font-mono">${esc(String(fid).slice(0,10))}…</td>
+      <td class="text-xs">${esc(s.planLabel||'-')}${s.amount?` · Rs.${s.amount}`:''}</td>
+      <td class="text-xs">${expiryLabel}</td>
+      <td class="text-xs font-bold ${statusColor}">${eff}</td>
+      <td class="whitespace-nowrap py-2">
+        <div class="flex flex-wrap gap-1 items-center">
+          <select id="plan_${fid}" class="border rounded px-1 py-1 text-xs">${PLAN_OPTIONS.map(p=>`<option value="${p.key}" ${p.key===(s.plan||'trial')?'selected':''}>${esc(p.label)}</option>`).join('')}</select>
+          <input id="amt_${fid}" type="number" value="${s.amount ?? planByKey(s.plan||'trial').price}" class="border rounded px-1 py-1 text-xs w-20" placeholder="Rs.">
+          <button onclick="adminApproveSchool('${fid}')" class="px-2 py-1 rounded-lg text-xs font-bold bg-green-600 text-white">✅ Approve</button>
+          <button onclick="adminDenySchool('${fid}')" class="px-2 py-1 rounded-lg text-xs font-bold bg-red-600 text-white">🚫 Deny</button>
+        </div>
       </td>
-    </tr>`).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No school requests yet.</td></tr>`;
-  document.getElementById('app').innerHTML = `<div class="max-w-4xl mx-auto p-4 space-y-5">
+    </tr>`;
+  }).join('') || `<tr><td colspan="7" class="text-center text-gray-400 py-4">No school requests yet.</td></tr>`;
+  document.getElementById('app').innerHTML = `<div class="max-w-5xl mx-auto p-4 space-y-5">
     ${card(`<div class="flex justify-between items-center flex-wrap gap-2"><h2 class="text-xl font-bold text-[var(--navy)]">⚙️ Platform Admin</h2><button onclick="logout()" class="bg-gray-200 rounded-lg px-4 py-1.5 text-sm font-bold">⬅️ Logout</button></div><p class="text-sm text-gray-600 mt-1">Connected as <b>${esc(adminConnectedEmail||'')}</b></p>`)}
+    <div class="grid sm:grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="doc-frame p-4 text-center"><div class="text-2xl font-bold text-[var(--navy)]">${totalSchools}</div><div class="text-xs text-gray-500 mt-1">🏫 Registered Schools</div></div>
+      <div class="doc-frame p-4 text-center"><div class="text-2xl font-bold text-green-600">${activeCount}</div><div class="text-xs text-gray-500 mt-1">✅ Active</div></div>
+      <div class="doc-frame p-4 text-center"><div class="text-2xl font-bold ${expiredCount||pendingCount?'text-amber-600':'text-gray-400'}">${expiredCount} / ${pendingCount}</div><div class="text-xs text-gray-500 mt-1">⌛ Expired / ⏳ Pending</div></div>
+      <div class="doc-frame p-4 text-center"><div class="text-2xl font-bold text-[var(--navy)]">Rs. ${totalIncome}</div><div class="text-xs text-gray-500 mt-1">💰 Total Income</div></div>
+    </div>
     ${card(`
       <h3 class="font-bold text-[var(--navy)] mb-3">➕ Manually Add a School</h3>
       <p class="text-xs text-gray-500 mb-3">Use this if a request arrived by email/WhatsApp instead of automatically. Get the File ID from their message.</p>
-      <div class="grid md:grid-cols-3 gap-3">
+      <div class="grid md:grid-cols-4 gap-3">
         <input id="adminSchoolName" placeholder="School Name" class="border rounded-lg px-3 py-2">
         <input id="adminSchoolGmail" placeholder="Headmaster Gmail" class="border rounded-lg px-3 py-2">
         <input id="adminFileId" placeholder="School File ID" class="border rounded-lg px-3 py-2">
+        <select id="adminSchoolPlan" class="border rounded-lg px-3 py-2">${PLAN_OPTIONS.map(p=>`<option value="${p.key}">${esc(p.label)}</option>`).join('')}</select>
       </div>
       <button onclick="adminAddSchool()" class="gold-btn rounded-lg px-5 py-2 font-bold mt-3">Add as Pending</button>
     `)}
     ${card(`
       <h3 class="font-bold text-[var(--navy)] mb-3">📋 Schools</h3>
       <div class="overflow-x-auto"><table class="w-full text-sm">
-        <thead><tr class="text-left border-b"><th class="py-2">Name</th><th>Gmail</th><th>File ID</th><th>Status</th><th>Action</th></tr></thead>
+        <thead><tr class="text-left border-b"><th class="py-2">Name</th><th>Gmail</th><th>File ID</th><th>Plan</th><th>Expiry</th><th>Status</th><th>Action</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>
     `)}
@@ -547,15 +685,14 @@ function computeOverallPct(student, marksData){
 function termWiseStats(student, marksData){
   const subs = subjectsForClass(student.cls);
   const m = marksData || DB.marks[student.id] || {};
-  const cum = [0,0,0,0];
-  subs.forEach(sub=>{
-    const rec = m[sub] || {};
-    let running=0;
-    EXAM_KEYS.forEach((k,i)=>{ running += Number(rec[k])||0; cum[i]+=running; });
-  });
   return EXAMS.map((e,i)=>{
-    const max = subs.length * EXAM_MAX_EACH * (i+1);
-    const pct = max? (cum[i]/max*100) : 0;
+    const key = EXAM_KEYS[i];
+    const anyEntered = subs.some(sub=>entered(m[sub], key));
+    if(!anyEntered) return {label:e.label, pct:null, grade:null};
+    let obtained=0;
+    subs.forEach(sub=>{ obtained += Number((m[sub]||{})[key])||0; });
+    const max = subs.length * EXAM_MAX_EACH;
+    const pct = max? (obtained/max*100) : 0;
     return {label:e.label, pct, grade:grade(pct)};
   });
 }
@@ -742,7 +879,7 @@ function renderMarksheetCard(student, marksData, yearLabel){
       <div class="ms-summary-box mt-4 p-2">
         <div class="text-center font-bold bg-[var(--navy)] text-white rounded py-1 mb-2">TERM-WISE PERFORMANCE (ALL SUBJECTS COMBINED)</div>
         <div class="grid grid-cols-4 gap-2 text-center text-xs px-1">
-          ${terms.map(t=>`<div class="border rounded-lg py-2"><div class="font-bold">${esc(t.label)}</div><div>${t.pct.toFixed(1)}%</div><div class="font-bold text-[var(--navy)]">${t.grade}</div></div>`).join('')}
+          ${terms.map(t=>`<div class="border rounded-lg py-2"><div class="font-bold">${esc(t.label)}</div>${t.pct===null?'<div class="text-gray-400">—</div><div class="text-gray-400 text-xs">Not entered</div>':`<div>${t.pct.toFixed(1)}%</div><div class="font-bold text-[var(--navy)]">${t.grade}</div>`}</div>`).join('')}
         </div>
       </div>
 
@@ -790,8 +927,8 @@ function renderMarksheetCard(student, marksData, yearLabel){
    already loaded and stable) and the finished result is handed to the
    print window / image renderer, so both always look identical.
    ============================================================ */
-const CARD_BASE_W = {marksheetCard:620, timetableCard:480, feeVoucherCard:480};
-const CARD_LABEL  = {marksheetCard:'Marksheet', timetableCard:'Timetable', feeVoucherCard:'Fee-Voucher', idCard:'ID-Card'};
+const CARD_BASE_W = {marksheetCard:620, timetableCard:480, feeVoucherCard:480, salarySlipCard:480};
+const CARD_LABEL  = {marksheetCard:'Marksheet', timetableCard:'Timetable', feeVoucherCard:'Fee-Voucher', idCard:'ID-Card', salarySlipCard:'Salary-Slip'};
 
 /* Print / image copy of a card: no editable inputs (they cut text off), no duplicate id. */
 function staticCardHtml(el){
@@ -983,10 +1120,9 @@ function renderLogin(){
           <div id="loginFields"></div>
           <div id="loginError" class="text-red-600 text-sm mt-2 hidden"></div>
           <button onclick="doLogin()" class="w-full navy-btn rounded-lg py-2.5 mt-4 font-bold">Login</button>
-          <p class="text-center text-xs text-gray-400 mt-3"><button onclick="adminConnect()" class="underline">⚙️ Platform Admin</button></p>
-          <p class="text-center text-xs text-gray-400 mt-2"><a href="privacy-policy.html" target="_blank" class="underline">Privacy Policy</a> · <a href="terms-of-service.html" target="_blank" class="underline">Terms of Service</a></p>
+          <p class="text-center text-xs text-gray-400 mt-3"><a href="privacy-policy.html" target="_blank" class="underline">Privacy Policy</a> · <a href="terms-of-service.html" target="_blank" class="underline">Terms of Service</a></p>
         </div>
-        <div class="doc-footer">
+        <div class="doc-footer" onclick="footerSecretClick()" style="cursor:default;">
           <span class="lead">Learn Today</span>
           <span class="lead2">Lead Tomorrow</span>
         </div>
@@ -1118,6 +1254,7 @@ const HM_TABS = [
   {key:'students', label:'Students', icon:'🎒'},
   {key:'marks', label:'Marks Overview', icon:'📊'},
   {key:'fees', label:'Fees', icon:'💰'},
+  {key:'salary', label:'Salary', icon:'🧾'},
   {key:'homework', label:'Homework', icon:'📚'},
   {key:'idcards', label:'ID Cards', icon:'🪪'},
   {key:'promotion', label:'Promotion', icon:'🎓'},
@@ -1136,6 +1273,7 @@ function renderHeadmaster(){
   if(ACTIVE_TAB==='students') content = hmStudents();
   if(ACTIVE_TAB==='marks') content = hmMarksOverview();
   if(ACTIVE_TAB==='fees') content = hmFees();
+  if(ACTIVE_TAB==='salary') content = hmSalary();
   if(ACTIVE_TAB==='homework') content = hmHomework();
   if(ACTIVE_TAB==='idcards') content = hmIdCards();
   if(ACTIVE_TAB==='promotion') content = hmPromotion();
@@ -1447,6 +1585,8 @@ function hmTeachers(){
       <input id="tPassword" type="text" placeholder="Set Login Password" class="border rounded-lg px-3 py-2">
       <input id="tGmail" type="email" placeholder="Gmail (for Drive access)" class="border rounded-lg px-3 py-2">
       <input id="tPhoto" type="file" accept="image/*" class="border rounded-lg px-2 py-2 text-sm">
+      <input id="tJoinDate" type="date" value="${todayISO()}" title="Join Date (used for salary tracking)" class="border rounded-lg px-3 py-2">
+      <input id="tSalary" type="number" placeholder="Monthly Salary (Rs.)" class="border rounded-lg px-3 py-2">
     </div>
     <button onclick="addTeacher()" class="navy-btn rounded-lg px-4 py-2 font-bold mb-4">+ Add Teacher</button>
     ${!driveAccessToken?'<p class="text-xs text-amber-600 mb-3">Connect Google Drive (Cloud Sync tab) as Headmaster first — Grant/Revoke Drive Access buttons need that connection to work.</p>':''}
@@ -1465,9 +1605,11 @@ function addTeacher(){
   const password=document.getElementById('tPassword').value.trim();
   const gmail=document.getElementById('tGmail').value.trim();
   const photoInput=document.getElementById('tPhoto');
+  const joinDate=document.getElementById('tJoinDate').value || todayISO();
+  const salary=Number(document.getElementById('tSalary').value)||0;
   if(!name||!subject){ alert('Please enter teacher name and subject.'); return; }
   if(!password){ alert('Please set a login password for this teacher.'); return; }
-  const finish=(photo)=>{ DB.teachers.push({id:uid(), name, subject, cls, password, gmail, photo:photo||null, drivePermissionId:null}); saveDB(); render(); };
+  const finish=(photo)=>{ DB.teachers.push({id:uid(), name, subject, cls, password, gmail, photo:photo||null, drivePermissionId:null, joinDate, salary}); saveDB(); render(); };
   if(photoInput.files && photoInput.files[0]){
     const reader = new FileReader();
     reader.onload = e=>finish(e.target.result);
@@ -1886,6 +2028,7 @@ const T_TABS = [
   {key:'students', label:'Students', icon:'🎒'},
   {key:'progress', label:'Student Progress', icon:'📈'},
   {key:'homework', label:'Homework', icon:'📚'},
+  {key:'salary', label:'My Salary', icon:'🧾'},
   {key:'announcements', label:'Announcements', icon:'📣'},
   {key:'timetable', label:'Timetable', icon:'🕒'},
   {key:'idcard', label:'My ID Card', icon:'🪪'},
@@ -1902,6 +2045,7 @@ function renderTeacher(){
   if(ACTIVE_TAB==='students') content = studentManagerCard(teacher.cls);
   if(ACTIVE_TAB==='progress') content = tProgress(teacher);
   if(ACTIVE_TAB==='homework') content = tHomework(teacher);
+  if(ACTIVE_TAB==='salary') content = renderTeacherSalary(teacher);
   if(ACTIVE_TAB==='announcements') content = renderAnnouncements('teacher');
   if(ACTIVE_TAB==='timetable') content = DB.config.timetable ? renderTimetableCard({}) : card('<p class="text-gray-500 text-center py-10">Timetable not generated yet.</p>');
   if(ACTIVE_TAB==='idcard') content = tIdCard(teacher);
@@ -2159,7 +2303,7 @@ function monthLabel(month){ return new Date(`${month}-01T00:00:00`).toLocaleStri
 function renderFeeVoucherCard(student, month){
   const cfg = DB.config;
   const rec = ensureFeeRecord(student.id, month, student.cls);
-  const due = `${month}-10`;
+  const due = nextMonthDue(month, 10);
   return `
   <div class="doc-frame max-w-md mx-auto" id="feeVoucherCard">
     <div class="doc-topbar"></div>
@@ -2232,6 +2376,13 @@ function monthsRange(fromDateStr, toMonthKey){
   }
   return out;
 }
+/* A month's fee/salary is due on a day within the FOLLOWING month, e.g.
+   November's fee is due by 10th December — not within November itself. */
+function nextMonthDue(monthKey, day){
+  let [y,m] = monthKey.split('-').map(Number);
+  m++; if(m>12){ m=1; y++; }
+  return `${y}-${String(m).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+}
 function feeSummary(stu){
   const months = monthsRange(stu.admissionDate || currentMonthKey()+'-01', currentMonthKey());
   let totalBilled=0, totalPaid=0; const unpaidMonths=[];
@@ -2257,6 +2408,11 @@ function hmDashboard(){
     const rec = ensureFeeRecord(s.id, cm, s.cls);
     if(rec.status!=='Paid'){ pendingCount++; pendingAmount+=rec.amount; }
   });
+  /* Overall (all-time, all students/teachers) running totals — the "perfect calculation" view */
+  let feeTotalPaid=0, feeTotalDue=0, feeOverdueStudents=0;
+  DB.students.forEach(s=>{ const sum=feeSummary(s); feeTotalPaid+=sum.totalPaid; feeTotalDue+=sum.totalDue; if(sum.unpaidCount>=2) feeOverdueStudents++; });
+  let salTotalPaid=0, salTotalDue=0, salOverdueStaff=0;
+  DB.teachers.forEach(t=>{ const sum=salarySummary(t); salTotalPaid+=sum.totalPaid; salTotalDue+=sum.totalDue; if(sum.unpaidCount>=2) salOverdueStaff++; });
   saveDB();
   const upcomingAnn = allAnnouncements('all').filter(a=>a.date>=today).slice(0,4);
   const cls = document.getElementById('dashClassSel')?.value || DB.config.classes[0];
@@ -2272,6 +2428,23 @@ function hmDashboard(){
       <div class="doc-frame p-4 text-center"><div class="text-3xl font-bold text-[var(--navy)]">${totalClasses}</div><div class="text-xs text-gray-500 mt-1">🏫 Total Classes</div></div>
       <div class="doc-frame p-4 text-center"><div class="text-3xl font-bold ${pendingCount?'text-red-600':'text-green-600'}">${pendingCount}</div><div class="text-xs text-gray-500 mt-1">💰 Pending This Month ${pendingCount?`(Rs. ${pendingAmount})`:''}</div></div>
     </div>
+    ${card(`
+      <h2 class="text-xl font-bold text-[var(--navy)] mb-3">💼 Overall Finances</h2>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div class="ms-summary-box p-3">
+          <div class="font-bold text-[var(--navy)] mb-2">💰 Student Fees (all-time)</div>
+          <div class="row"><span>Total Collected</span><span class="text-green-600 font-bold">Rs. ${feeTotalPaid}</span></div>
+          <div class="row"><span>Total Due</span><span class="${feeTotalDue>0?'text-red-600':'text-green-600'} font-bold">Rs. ${feeTotalDue}</span></div>
+          <div class="row" style="border-bottom:none;"><span>Students 2+ months overdue</span><span class="font-bold ${feeOverdueStudents?'text-red-600':'text-green-600'}">${feeOverdueStudents}</span></div>
+        </div>
+        <div class="ms-summary-box p-3">
+          <div class="font-bold text-[var(--navy)] mb-2">🧾 Staff Salary (all-time)</div>
+          <div class="row"><span>Total Paid</span><span class="text-green-600 font-bold">Rs. ${salTotalPaid}</span></div>
+          <div class="row"><span>Total Due</span><span class="${salTotalDue>0?'text-red-600':'text-green-600'} font-bold">Rs. ${salTotalDue}</span></div>
+          <div class="row" style="border-bottom:none;"><span>Staff 2+ months overdue</span><span class="font-bold ${salOverdueStaff?'text-red-600':'text-green-600'}">${salOverdueStaff}</span></div>
+        </div>
+      </div>
+    `)}
     ${card(`
       <h2 class="text-xl font-bold text-[var(--navy)] mb-3">📊 Today's Attendance</h2>
       <div class="flex items-center gap-4 flex-wrap">
@@ -2297,6 +2470,141 @@ function hmDashboard(){
   </div>`;
 }
 
+
+/* ============================================================
+   SALARY — same pattern as Fees, but for Teachers (keyed by joinDate
+   instead of admissionDate). Due date is also 1st–10th of the
+   FOLLOWING month, matching how the fee vouchers work.
+   ============================================================ */
+function ensureSalaryRecord(teacherId, month, defaultAmount){
+  if(!DB.salaries[teacherId]) DB.salaries[teacherId]={};
+  if(!DB.salaries[teacherId][month]) DB.salaries[teacherId][month] = {amount: Number(defaultAmount)||0, status:'Unpaid', paidOn:null};
+  return DB.salaries[teacherId][month];
+}
+function setSalaryAmount(teacherId,month,val){ const rec=ensureSalaryRecord(teacherId,month,0); rec.amount=Number(val)||0; saveDB(); render(); }
+function setSalaryStatus(teacherId,month,status){ const t=DB.teachers.find(x=>x.id===teacherId); const rec=ensureSalaryRecord(teacherId,month,t?t.salary:0); rec.status=status; rec.paidOn = status==='Paid'?todayISO():null; saveDB(); render(); }
+function salarySummary(t){
+  const months = monthsRange(t.joinDate || currentMonthKey()+'-01', currentMonthKey());
+  let totalBilled=0, totalPaid=0; const unpaidMonths=[];
+  months.forEach(mo=>{
+    const rec = ensureSalaryRecord(t.id, mo, t.salary);
+    totalBilled += rec.amount;
+    if(rec.status==='Paid') totalPaid += rec.amount; else unpaidMonths.push(mo);
+  });
+  return {totalBilled, totalPaid, totalDue: totalBilled-totalPaid, unpaidMonths, unpaidCount: unpaidMonths.length};
+}
+function renderSalarySlipCard(t, month){
+  const cfg = DB.config;
+  const rec = ensureSalaryRecord(t.id, month, t.salary);
+  const due = nextMonthDue(month, 10);
+  return `
+  <div class="doc-frame max-w-md mx-auto" id="salarySlipCard">
+    <div class="doc-topbar"></div>
+    <div class="doc-arc">
+      <div class="doc-shield">${cfg.logo?`<img src="${cfg.logo}" class="w-full h-full object-cover rounded-lg">`:'🎓'}</div>
+      <div class="doc-title">${esc(cfg.schoolName.split(' ').slice(0,2).join(' '))}</div>
+      <div class="doc-subtitle">${esc(cfg.schoolName.split(' ').slice(2).join(' '))}</div>
+      <div class="doc-badge">★ SALARY SLIP ★</div>
+    </div>
+    <div class="p-5 space-y-4">
+      <div class="ms-info-box grid grid-cols-2 gap-2">
+        <div><b>Staff:</b> ${esc(t.name)}</div>
+        <div><b>Role:</b> ${esc(t.subject)} Teacher</div>
+        <div><b>Class:</b> ${esc(t.cls)}</div>
+        <div><b>Month:</b> ${monthLabel(month)}</div>
+        <div><b>Due Date:</b> ${due}</div>
+      </div>
+      <div class="ms-summary-box">
+        <div class="row"><span>Monthly Salary</span><span>Rs. ${rec.amount}</span></div>
+        <div class="row"><span>Status</span><span class="${rec.status==='Paid'?'text-green-600':'text-red-600'}">${rec.status}${rec.paidOn?` (${rec.paidOn})`:''}</span></div>
+        <div class="row" style="border-bottom:none;font-size:1rem;"><span>Total Payable</span><span>Rs. ${rec.amount}</span></div>
+      </div>
+      <p class="text-xs text-gray-500">This slip is computer-generated and valid without signature.</p>
+    </div>
+    <div class="doc-footer">
+      <span class="lead">Learn Today</span>
+      <span class="lead2">Lead Tomorrow</span>
+    </div>
+  </div>`;
+}
+function hmSalary(){
+  const tid = document.getElementById('salTeacherSel')?.value || (DB.teachers[0]&&DB.teachers[0].id);
+  const month = document.getElementById('salMonthSel')?.value || currentMonthKey();
+  const t = DB.teachers.find(x=>x.id===tid);
+  let collectionBlock = '<p class="text-gray-400 text-sm">No teachers yet.</p>';
+  if(t){
+    const rec = ensureSalaryRecord(t.id, month, t.salary);
+    collectionBlock = `
+      <div class="flex flex-wrap gap-3 mb-4 items-center">
+        <select id="salTeacherSel" onchange="render()" class="border rounded-lg px-3 py-2">${DB.teachers.map(x=>`<option value="${x.id}" ${x.id===tid?'selected':''}>${esc(x.name)}</option>`).join('')}</select>
+        <input id="salMonthSel" type="month" value="${month}" onchange="render()" class="border rounded-lg px-3 py-2">
+        <input type="number" value="${rec.amount}" onchange="setSalaryAmount('${t.id}','${month}',this.value)" class="border rounded-lg px-2 py-2 w-28" title="Amount for this month">
+        <button onclick="setSalaryStatus('${t.id}','${month}','Paid')" class="px-3 py-2 rounded-lg text-xs font-bold ${rec.status==='Paid'?'bg-green-600 text-white':'bg-gray-100'}">Paid</button>
+        <button onclick="setSalaryStatus('${t.id}','${month}','Unpaid')" class="px-3 py-2 rounded-lg text-xs font-bold ${rec.status==='Unpaid'?'bg-red-600 text-white':'bg-gray-100'}">Unpaid</button>
+        <button onclick="viewSalarySlip('${t.id}','${month}')" class="text-[var(--navy)] text-sm font-bold">🧾 Slip</button>
+      </div>`;
+  }
+  const duesRows = DB.teachers.map(x=>{
+    const sum = salarySummary(x);
+    const badge = sum.unpaidCount>=3 ? `<span class="ann-badge bg-red-100 text-red-700">⚠️ ${sum.unpaidCount} months overdue</span>`
+                : sum.unpaidCount>=1 ? `<span class="ann-badge bg-amber-100 text-amber-700">${sum.unpaidCount} month${sum.unpaidCount>1?'s':''} due</span>`
+                : `<span class="ann-badge bg-green-100 text-green-700">✅ Up to date</span>`;
+    return `<tr class="border-b">
+      <td class="py-2">${esc(x.name)}</td><td>${esc(x.subject)}</td>
+      <td class="text-green-700 font-bold">Rs. ${sum.totalPaid}</td>
+      <td class="${sum.totalDue>0?'text-red-600':'text-gray-400'} font-bold">Rs. ${sum.totalDue}</td>
+      <td>${badge}</td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No teachers yet.</td></tr>`;
+  saveDB();
+  return `
+  <div class="space-y-5">
+    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-4">🧾 Salary Collection</h2>${collectionBlock}`)}
+    ${card(`
+      <h2 class="text-xl font-bold text-[var(--navy)] mb-4">📋 Salary Dues Summary</h2>
+      <p class="text-xs text-gray-500 mb-3">Running total since each teacher's join date — flags staff who are 2+ months behind.</p>
+      <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead><tr class="text-left border-b"><th class="py-2">Name</th><th>Subject</th><th>Total Paid</th><th>Total Due</th><th>Status</th></tr></thead>
+        <tbody>${duesRows}</tbody>
+      </table>
+      </div>
+    `)}
+    <div id="salarySlipPreview"></div>
+  </div>`;
+}
+function viewSalarySlip(teacherId, month){
+  const box = document.getElementById('salarySlipPreview'); if(!box) return;
+  const t = DB.teachers.find(x=>x.id===teacherId); if(!t) return;
+  box.innerHTML = `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('salarySlipCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('salarySlipCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` + renderSalarySlipCard(t, month);
+}
+function renderTeacherSalary(t){
+  const sum = salarySummary(t);
+  const cm = currentMonthKey();
+  if(!DB.salaries[t.id] || !DB.salaries[t.id][cm]){ ensureSalaryRecord(t.id, cm, t.salary); saveDB(); }
+  const months = Object.keys(DB.salaries[t.id]||{}).sort().reverse();
+  const rows = months.map(m=>{
+    const rec = DB.salaries[t.id][m];
+    return `<tr class="border-b"><td class="py-2">${monthLabel(m)}</td><td>Rs. ${rec.amount}</td>
+      <td class="font-bold ${rec.status==='Paid'?'text-green-600':'text-red-600'}">${rec.status}</td>
+      <td><button onclick="viewSalarySlip('${t.id}','${m}')" class="text-[var(--navy)] text-sm font-bold">🧾 Slip</button></td></tr>`;
+  }).join('') || `<tr><td colspan="4" class="text-center text-gray-400 py-4">No salary records yet.</td></tr>`;
+  return `${card(`
+    <h2 class="text-xl font-bold text-[var(--navy)] mb-3">💰 My Salary</h2>
+    <div class="grid sm:grid-cols-3 gap-3 mb-4">
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Paid</div><div class="text-xl font-bold text-green-600">Rs. ${sum.totalPaid}</div></div>
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Due</div><div class="text-xl font-bold ${sum.totalDue>0?'text-red-600':'text-green-600'}">Rs. ${sum.totalDue}</div></div>
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Status</div><div class="text-sm font-bold mt-1">${sum.unpaidCount>=3?`⚠️ ${sum.unpaidCount} months overdue`:sum.unpaidCount>=1?`${sum.unpaidCount} month${sum.unpaidCount>1?'s':''} due`:'✅ Up to date'}</div></div>
+    </div>
+    <h3 class="font-bold text-[var(--navy)] mb-2">Month-by-Month</h3>
+    <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead><tr class="text-left border-b"><th class="py-2">Month</th><th>Amount</th><th>Status</th><th>Slip</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    </div>
+  `)}<div id="salarySlipPreview" class="mt-5"></div>`;
+}
 
 function hmFees(){
   const cls = document.getElementById('feeClassSel')?.value || DB.config.classes[0];
@@ -2607,7 +2915,15 @@ function renderParent(){
 /* ============================================================
    ROOT RENDER
    ============================================================ */
+let _footerClicks=0, _footerClickTimer=null;
+function footerSecretClick(){
+  _footerClicks++;
+  clearTimeout(_footerClickTimer);
+  _footerClickTimer = setTimeout(()=>{ _footerClicks=0; }, 2000);
+  if(_footerClicks>=5){ _footerClicks=0; clearTimeout(_footerClickTimer); adminConnect(); }
+}
 function render(){
+  if(ADMIN_GOOGLE_OK && (!SESSION || SESSION.role!=='superadmin')){ renderAdminCredLogin(); return; }
   if(!SESSION){ renderLogin(); return; }
   if(SESSION.role==='superadmin'){ renderSuperAdmin(); return; }
   if(registryConfigured() && DRIVE_FILE_ID && APPROVAL_STATE.status!=='approved'){

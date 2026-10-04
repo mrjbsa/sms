@@ -125,4 +125,9 @@
   @media print{
     .no-print{ display:none !important; }
     *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+    /* Let a tall card flow naturally onto a 2nd printed page (the "back")
+       instead of being clipped by the rounded-corner overflow:hidden trick. */
+    .doc-frame{ overflow:visible !important; box-shadow:none !important; }
+    .doc-frame table, .doc-frame .ann-card, .doc-frame .ms-summary-box{ break-inside:avoid; }
+    .doc-arc, .doc-topbar, .doc-footer{ break-inside:avoid; }
   }
