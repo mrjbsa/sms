@@ -150,11 +150,8 @@ function copyShareLink(){
    comparing today's date to the stored expiryDate — nothing needs to
    "run" on a server for a plan to lapse.
    ============================================================ */
-const OWNER_GMAIL = 'mrjbsa.313@gmail.com';           // the Google account that unlocks the Platform Admin panel
 const OWNER_CONTACT_EMAIL = 'mrjbsa.official@outlook.com'; // shown to schools that are denied / expired / still pending
-const MASTER_REGISTRY_FILE_ID = '1k4GUW-UpL1UHIycxXajWsV3attplEdto';                        // paste the registry file's ID here once created — leave blank to disable the gate entirely
-const ADMIN_USERNAME = 'Mr JB';            // second factor, asked AFTER the OWNER_GMAIL Google sign-in succeeds
-const ADMIN_PASSWORD = '#Mr.s@.JB3!3';
+const MASTER_REGISTRY_FILE_ID = '1k4GUW-UpL1UHIycxXajWsV3attplEdto';                        // must match the admin site's value — paste here once created; leave blank to disable the gate entirely
 
 /* Plan catalog — "price" is just a suggested amount shown when approving;
    the admin can edit it per school (discounts, negotiated deals, etc.)
@@ -171,13 +168,6 @@ const PLAN_OPTIONS = [
   {key:'lifetime', label:'Lifetime',          months:null, price:40000},
 ];
 function planByKey(key){ return PLAN_OPTIONS.find(p=>p.key===key) || PLAN_OPTIONS[0]; }
-function computeExpiry(startDateStr, planKey){
-  const plan = planByKey(planKey);
-  if(!plan.months) return null; // lifetime — never expires
-  const d = new Date(startDateStr+'T00:00:00');
-  d.setMonth(d.getMonth()+plan.months);
-  return d.toISOString().slice(0,10);
-}
 /* The stored status plus a live expiry check — this is what actually decides
    access, so a plan "auto-denies" the moment its date passes, with nothing
    needing to run on a schedule anywhere. */
@@ -188,8 +178,6 @@ function effectiveStatus(entry){
 }
 
 let APPROVAL_STATE = {status:'unknown', entry:null, checkedAt:null}; // status: 'unknown'|'approved'|'pending'|'denied'|'expired'
-let adminTokenClient=null, adminAccessToken=null, adminConnectedEmail=null, adminRegistry=null;
-let ADMIN_GOOGLE_OK=false; // true once OWNER_GMAIL has signed in; still needs username+password after this
 let REQUESTED_PLAN='trial';
 function setRequestedPlan(v){ REQUESTED_PLAN=v; }
 
@@ -285,203 +273,6 @@ function renderApprovalGate(){
       </div>
       <div class="doc-footer"><span class="lead">Learn Today</span><span class="lead2">Lead Tomorrow</span></div>
     </div>
-  </div>`;
-}
-
-/* ---------- Platform Admin (owner-only, hidden) ----------
-   Reached only by clicking the login card's footer 5 times, then signing in
-   with BOTH the OWNER_GMAIL Google account AND the fixed username/password. */
-function adminInitTokenClient(){
-  if(adminTokenClient || !window.google || !google.accounts) return;
-  adminTokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: GOOGLE_CLIENT_ID,
-    scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email',
-    callback:(resp)=>{
-      if(resp.error){ alert('Google sign-in failed: '+resp.error); return; }
-      adminAccessToken = resp.access_token;
-      fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{Authorization:'Bearer '+adminAccessToken}})
-        .then(r=>{ if(!r.ok) throw new Error('Could not read your Google account info (status '+r.status+').'); return r.json(); })
-        .then(p=>{
-          adminConnectedEmail = p.email;
-          if(OWNER_GMAIL && !OWNER_GMAIL.includes('PASTE') && p.email.toLowerCase()!==OWNER_GMAIL.toLowerCase()){
-            alert(`This Google account is not authorised as the Platform Admin.\n\nYou signed in as: ${p.email}\nExpected admin account: ${OWNER_GMAIL}\n\nPlease try again and choose the correct Google account.`);
-            adminAccessToken=null; adminConnectedEmail=null; return;
-          }
-          ADMIN_GOOGLE_OK = true;
-          render(); // shows the username/password screen next
-        })
-        .catch(e=>alert('Platform Admin sign-in failed: '+e.message));
-    }
-  });
-}
-function adminConnect(){
-  if(!driveConfigured()){ alert("Google Drive isn't set up yet — add a Google Client ID & API key first (see Cloud Sync instructions)."); return; }
-  adminInitTokenClient();
-  if(!adminTokenClient){ alert('Still loading Google sign-in — please try again in a moment.'); return; }
-  adminTokenClient.requestAccessToken({prompt:'select_account'});
-}
-function adminCredLogin(){
-  const u = document.getElementById('adminUser').value;
-  const p = document.getElementById('adminPass').value;
-  if(u===ADMIN_USERNAME && p===ADMIN_PASSWORD){
-    SESSION = {role:'superadmin'};
-    sessionStorage.setItem('bfhs_session', JSON.stringify(SESSION));
-    if(registryConfigured()) adminLoadRegistry().then(render); else render();
-  } else {
-    alert('Incorrect username or password.');
-  }
-}
-function renderAdminCredLogin(){
-  document.getElementById('app').innerHTML = `<div class="min-h-screen flex items-center justify-center p-4">
-    <div class="w-full max-w-sm doc-frame">
-      <div class="doc-topbar"></div>
-      <div class="doc-arc"><div class="doc-shield">🔐</div><div class="doc-title" style="font-size:1.2rem;">Admin Login</div><div class="doc-subtitle">Signed in as ${esc(adminConnectedEmail||'')}</div></div>
-      <div class="p-6 space-y-3">
-        <input id="adminUser" placeholder="Username" class="w-full border rounded-lg px-3 py-2" autocomplete="off">
-        <input id="adminPass" type="password" placeholder="Password" class="w-full border rounded-lg px-3 py-2">
-        <button onclick="adminCredLogin()" class="w-full navy-btn rounded-lg py-2.5 font-bold">Login</button>
-        <button onclick="ADMIN_GOOGLE_OK=false; logout();" class="w-full text-sm text-gray-500 underline">Cancel</button>
-      </div>
-      <div class="doc-footer"><span class="lead">Learn Today</span><span class="lead2">Lead Tomorrow</span></div>
-    </div>
-  </div>`;
-}
-function adminLoadRegistry(){
-  return fetch(`https://www.googleapis.com/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?alt=media`,{headers:{Authorization:'Bearer '+adminAccessToken}})
-    .then(r=>{ if(!r.ok) throw new Error('load failed'); return r.json(); })
-    .then(reg=>{ adminRegistry = (reg && reg.schools) ? reg : {schools:{}}; })
-    .catch(()=>{ adminRegistry = {schools:{}}; });
-}
-function adminSaveRegistry(){
-  return fetch(`https://www.googleapis.com/upload/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?uploadType=media`,{
-    method:'PATCH', headers:{Authorization:'Bearer '+adminAccessToken, 'Content-Type':'application/json'},
-    body: JSON.stringify(adminRegistry)
-  }).then(r=>r.json());
-}
-function adminCreateRegistry(){
-  const boundary='bfhs_registry_boundary';
-  const meta = {name:'school_registry.json', mimeType:'application/json'};
-  const initial = {schools:{}};
-  const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n${JSON.stringify(initial)}\r\n--${boundary}--`;
-  fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',{
-    method:'POST', headers:{Authorization:'Bearer '+adminAccessToken, 'Content-Type':`multipart/related; boundary=${boundary}`}, body
-  }).then(r=>r.json()).then(f=>{
-    if(!f.id){ alert('Could not create the registry file: '+(f.error?.message||'unknown error')); return; }
-    fetch(`https://www.googleapis.com/drive/v3/files/${f.id}/permissions`,{
-      method:'POST', headers:{Authorization:'Bearer '+adminAccessToken,'Content-Type':'application/json'},
-      body: JSON.stringify({type:'anyone', role:'reader'})
-    }).then(()=>{
-      adminRegistry = {schools:{}};
-      alert(`Registry created!\n\nFile ID: ${f.id}\n\nPaste this into the MASTER_REGISTRY_FILE_ID constant near the top of script.js and re-upload — a one-time step. Until you do, the approval gate stays off for everyone.`);
-      render();
-    });
-  }).catch(e=>alert('Could not create the registry file: '+e.message));
-}
-function adminApproveSchool(fileId){
-  const planSel = document.getElementById('plan_'+fileId);
-  const amtInput = document.getElementById('amt_'+fileId);
-  const planKey = planSel ? planSel.value : 'trial';
-  const amount = amtInput ? (Number(amtInput.value)||0) : 0;
-  if(!adminRegistry) adminRegistry={schools:{}};
-  if(!adminRegistry.schools[fileId]) adminRegistry.schools[fileId] = {name:'(manually added)', gmail:'', requestedAt:new Date().toISOString()};
-  const start = todayISO();
-  Object.assign(adminRegistry.schools[fileId], {
-    status:'approved', plan:planKey, planLabel:planByKey(planKey).label,
-    amount, startDate:start, expiryDate:computeExpiry(start, planKey),
-    decidedAt:new Date().toISOString()
-  });
-  adminSaveRegistry().then(()=>render());
-}
-function adminDenySchool(fileId){
-  if(!adminRegistry) adminRegistry={schools:{}};
-  if(!adminRegistry.schools[fileId]) adminRegistry.schools[fileId] = {name:'(manually added)', gmail:'', requestedAt:new Date().toISOString()};
-  adminRegistry.schools[fileId].status='denied';
-  adminRegistry.schools[fileId].decidedAt=new Date().toISOString();
-  adminSaveRegistry().then(()=>render());
-}
-function adminAddSchool(){
-  const fileId = document.getElementById('adminFileId').value.trim();
-  const name = document.getElementById('adminSchoolName').value.trim();
-  const gmail = document.getElementById('adminSchoolGmail').value.trim();
-  const planKey = document.getElementById('adminSchoolPlan').value;
-  if(!fileId){ alert("Paste the school's File ID (from their request email/WhatsApp message)."); return; }
-  if(!adminRegistry) adminRegistry={schools:{}};
-  adminRegistry.schools[fileId] = {name:name||'(unnamed)', gmail, status:'pending', plan:planKey, planLabel:planByKey(planKey).label, requestedAt:new Date().toISOString()};
-  adminSaveRegistry().then(()=>render());
-}
-function renderSuperAdmin(){
-  if(!registryConfigured()){
-    document.getElementById('app').innerHTML = `<div class="max-w-lg mx-auto p-6 mt-10">${card(`
-      <h2 class="text-xl font-bold text-[var(--navy)] mb-4">⚙️ Platform Admin — Set Up Registry</h2>
-      <p class="text-sm text-gray-600 mb-4">Connected as <b>${esc(adminConnectedEmail||'')}</b>. Create your one master registry file (once, ever) to start approving schools.</p>
-      <button onclick="adminCreateRegistry()" class="navy-btn rounded-lg px-5 py-2 font-bold">➕ Create Master Registry</button>
-      <button onclick="logout()" class="bg-gray-200 rounded-lg px-5 py-2 font-bold ml-2">⬅️ Back to Login</button>
-    `)}</div>`;
-    return;
-  }
-  const schools = (adminRegistry && adminRegistry.schools) || {};
-  const entries = Object.entries(schools);
-  const totalSchools = entries.length;
-  const totalIncome = entries.reduce((sum,[,s])=>sum+(Number(s.amount)||0),0);
-  const activeCount = entries.filter(([,s])=>effectiveStatus(s)==='approved').length;
-  const expiredCount = entries.filter(([,s])=>effectiveStatus(s)==='expired').length;
-  const pendingCount = entries.filter(([,s])=>effectiveStatus(s)==='pending').length;
-  const today = todayISO();
-  const rows = entries.sort((a,b)=>(b[1].requestedAt||'').localeCompare(a[1].requestedAt||'')).map(([fid,s])=>{
-    const eff = effectiveStatus(s);
-    let expiryLabel = '—';
-    if(s.status==='approved'){
-      if(!s.expiryDate) expiryLabel = 'Lifetime';
-      else{
-        const daysLeft = Math.ceil((new Date(s.expiryDate+'T00:00:00') - new Date(today+'T00:00:00'))/86400000);
-        expiryLabel = eff==='expired' ? `Expired ${s.expiryDate}` : `${s.expiryDate} (${daysLeft}d left)`;
-      }
-    }
-    const statusColor = eff==='approved'?'text-green-600':eff==='expired'?'text-amber-600':eff==='denied'?'text-red-600':'text-gray-500';
-    return `
-    <tr class="border-b align-top">
-      <td class="py-2 text-xs">${esc(s.name||'-')}</td>
-      <td class="text-xs">${esc(s.gmail||'-')}</td>
-      <td class="text-xs font-mono">${esc(String(fid).slice(0,10))}…</td>
-      <td class="text-xs">${esc(s.planLabel||'-')}${s.amount?` · Rs.${s.amount}`:''}</td>
-      <td class="text-xs">${expiryLabel}</td>
-      <td class="text-xs font-bold ${statusColor}">${eff}</td>
-      <td class="whitespace-nowrap py-2">
-        <div class="flex flex-wrap gap-1 items-center">
-          <select id="plan_${fid}" class="border rounded px-1 py-1 text-xs">${PLAN_OPTIONS.map(p=>`<option value="${p.key}" ${p.key===(s.plan||'trial')?'selected':''}>${esc(p.label)}</option>`).join('')}</select>
-          <input id="amt_${fid}" type="number" value="${s.amount ?? planByKey(s.plan||'trial').price}" class="border rounded px-1 py-1 text-xs w-20" placeholder="Rs.">
-          <button onclick="adminApproveSchool('${fid}')" class="px-2 py-1 rounded-lg text-xs font-bold bg-green-600 text-white">✅ Approve</button>
-          <button onclick="adminDenySchool('${fid}')" class="px-2 py-1 rounded-lg text-xs font-bold bg-red-600 text-white">🚫 Deny</button>
-        </div>
-      </td>
-    </tr>`;
-  }).join('') || `<tr><td colspan="7" class="text-center text-gray-400 py-4">No school requests yet.</td></tr>`;
-  document.getElementById('app').innerHTML = `<div class="max-w-5xl mx-auto p-4 space-y-5">
-    ${card(`<div class="flex justify-between items-center flex-wrap gap-2"><h2 class="text-xl font-bold text-[var(--navy)]">⚙️ Platform Admin</h2><button onclick="logout()" class="bg-gray-200 rounded-lg px-4 py-1.5 text-sm font-bold">⬅️ Logout</button></div><p class="text-sm text-gray-600 mt-1">Connected as <b>${esc(adminConnectedEmail||'')}</b></p>`)}
-    <div class="grid sm:grid-cols-2 md:grid-cols-4 gap-4">
-      <div class="doc-frame p-4 text-center"><div class="text-2xl font-bold text-[var(--navy)]">${totalSchools}</div><div class="text-xs text-gray-500 mt-1">🏫 Registered Schools</div></div>
-      <div class="doc-frame p-4 text-center"><div class="text-2xl font-bold text-green-600">${activeCount}</div><div class="text-xs text-gray-500 mt-1">✅ Active</div></div>
-      <div class="doc-frame p-4 text-center"><div class="text-2xl font-bold ${expiredCount||pendingCount?'text-amber-600':'text-gray-400'}">${expiredCount} / ${pendingCount}</div><div class="text-xs text-gray-500 mt-1">⌛ Expired / ⏳ Pending</div></div>
-      <div class="doc-frame p-4 text-center"><div class="text-2xl font-bold text-[var(--navy)]">Rs. ${totalIncome}</div><div class="text-xs text-gray-500 mt-1">💰 Total Income</div></div>
-    </div>
-    ${card(`
-      <h3 class="font-bold text-[var(--navy)] mb-3">➕ Manually Add a School</h3>
-      <p class="text-xs text-gray-500 mb-3">Use this if a request arrived by email/WhatsApp instead of automatically. Get the File ID from their message.</p>
-      <div class="grid md:grid-cols-4 gap-3">
-        <input id="adminSchoolName" placeholder="School Name" class="border rounded-lg px-3 py-2">
-        <input id="adminSchoolGmail" placeholder="Headmaster Gmail" class="border rounded-lg px-3 py-2">
-        <input id="adminFileId" placeholder="School File ID" class="border rounded-lg px-3 py-2">
-        <select id="adminSchoolPlan" class="border rounded-lg px-3 py-2">${PLAN_OPTIONS.map(p=>`<option value="${p.key}">${esc(p.label)}</option>`).join('')}</select>
-      </div>
-      <button onclick="adminAddSchool()" class="gold-btn rounded-lg px-5 py-2 font-bold mt-3">Add as Pending</button>
-    `)}
-    ${card(`
-      <h3 class="font-bold text-[var(--navy)] mb-3">📋 Schools</h3>
-      <div class="overflow-x-auto"><table class="w-full text-sm">
-        <thead><tr class="text-left border-b"><th class="py-2">Name</th><th>Gmail</th><th>File ID</th><th>Plan</th><th>Expiry</th><th>Status</th><th>Action</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table></div>
-    `)}
   </div>`;
 }
 
@@ -927,7 +718,7 @@ function renderMarksheetCard(student, marksData, yearLabel){
    already loaded and stable) and the finished result is handed to the
    print window / image renderer, so both always look identical.
    ============================================================ */
-const CARD_BASE_W = {marksheetCard:620, timetableCard:480, feeVoucherCard:480, salarySlipCard:480};
+const CARD_BASE_W = {marksheetCard:700, timetableCard:560, feeVoucherCard:560, salarySlipCard:560};
 const CARD_LABEL  = {marksheetCard:'Marksheet', timetableCard:'Timetable', feeVoucherCard:'Fee-Voucher', idCard:'ID-Card', salarySlipCard:'Salary-Slip'};
 
 /* Print / image copy of a card: no editable inputs (they cut text off), no duplicate id. */
@@ -989,7 +780,7 @@ async function printEl(id){
   const html = built.node.outerHTML;
   built.host.remove();
   const page = built.isId ? '85.6mm 54mm' : 'A4';
-  const margin = built.isId ? '0' : '12mm';
+  const margin = built.isId ? '0' : '8mm';
   w.document.open();
   w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${CARD_LABEL[id]||'Print'}</title>
     <style>${collectPageCss()}</style>
@@ -1122,7 +913,7 @@ function renderLogin(){
           <button onclick="doLogin()" class="w-full navy-btn rounded-lg py-2.5 mt-4 font-bold">Login</button>
           <p class="text-center text-xs text-gray-400 mt-3"><a href="privacy-policy.html" target="_blank" class="underline">Privacy Policy</a> · <a href="terms-of-service.html" target="_blank" class="underline">Terms of Service</a></p>
         </div>
-        <div class="doc-footer" onclick="footerSecretClick()" style="cursor:default;">
+        <div class="doc-footer">
           <span class="lead">Learn Today</span>
           <span class="lead2">Lead Tomorrow</span>
         </div>
@@ -2934,17 +2725,8 @@ function renderParent(){
 /* ============================================================
    ROOT RENDER
    ============================================================ */
-let _footerClicks=0, _footerClickTimer=null;
-function footerSecretClick(){
-  _footerClicks++;
-  clearTimeout(_footerClickTimer);
-  _footerClickTimer = setTimeout(()=>{ _footerClicks=0; }, 2000);
-  if(_footerClicks>=5){ _footerClicks=0; clearTimeout(_footerClickTimer); adminConnect(); }
-}
 function render(){
-  if(ADMIN_GOOGLE_OK && (!SESSION || SESSION.role!=='superadmin')){ renderAdminCredLogin(); return; }
   if(!SESSION){ renderLogin(); return; }
-  if(SESSION.role==='superadmin'){ renderSuperAdmin(); return; }
   if(registryConfigured() && DRIVE_FILE_ID && APPROVAL_STATE.status!=='approved'){
     document.getElementById('app').innerHTML = renderApprovalGate();
     return;
