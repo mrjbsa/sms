@@ -399,6 +399,11 @@ function renderCloudSyncPanel(){
       </div>
     </div>
     <div class="mt-4 pt-4 border-t">
+      <h3 class="font-bold text-[var(--navy)] mb-1">⚙️ Platform Approval Gate</h3>
+      <p class="text-xs ${registryConfigured()?'text-green-600':'text-red-600'} font-bold mb-1">${registryConfigured() ? '✅ ON — new schools need admin approval before their dashboard opens.' : '🚫 OFF — anyone who connects Google Drive gets in immediately, no approval needed.'}</p>
+      <p class="text-xs text-gray-500">This school's current status: <b>${esc(APPROVAL_STATE.status)}</b>${APPROVAL_STATE.checkedAt?` (checked ${APPROVAL_STATE.checkedAt.toLocaleTimeString()})`:''}. If the gate shows OFF here but you expect it ON, this device is running a script.js build where MASTER_REGISTRY_FILE_ID doesn't match the admin site's — re-upload the latest public script.js.</p>
+    </div>
+    <div class="mt-4 pt-4 border-t">
       <h3 class="font-bold text-[var(--navy)] mb-1">🔒 About security</h3>
       <p class="text-xs text-gray-500">Editing (Headmaster/Teachers) always requires signing in with a Google account that has been given Editor access to this file. "Enable Parent Viewing" makes the file <b>readable by anyone with the link</b>, which is what lets Parents see records without signing in — so treat the School Link like a password and only share it with your own school's families. Teacher/Parent login passwords set inside this app are stored in that same data file in plain text, not encrypted — fine for a small trusted school deployment, but not bank-grade security. For stronger protection, keep "Enable Parent Viewing" off and instead give each parent their own Google account with Viewer access, or use this system for non-sensitive records only.</p>
     </div>`:''}
