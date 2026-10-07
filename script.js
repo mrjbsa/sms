@@ -401,7 +401,8 @@ function renderCloudSyncPanel(){
     <div class="mt-4 pt-4 border-t">
       <h3 class="font-bold text-[var(--navy)] mb-1">⚙️ Platform Approval Gate</h3>
       <p class="text-xs ${registryConfigured()?'text-green-600':'text-red-600'} font-bold mb-1">${registryConfigured() ? '✅ ON — new schools need admin approval before their dashboard opens.' : '🚫 OFF — anyone who connects Google Drive gets in immediately, no approval needed.'}</p>
-      <p class="text-xs text-gray-500">This school's current status: <b>${esc(APPROVAL_STATE.status)}</b>${APPROVAL_STATE.checkedAt?` (checked ${APPROVAL_STATE.checkedAt.toLocaleTimeString()})`:''}. If the gate shows OFF here but you expect it ON, this device is running a script.js build where MASTER_REGISTRY_FILE_ID doesn't match the admin site's — re-upload the latest public script.js.</p>
+      <p class="text-xs text-gray-500">This school's current status: <b>${esc(APPROVAL_STATE.status)}</b>${APPROVAL_STATE.checkedAt?` (checked ${APPROVAL_STATE.checkedAt.toLocaleTimeString()})`:''}.</p>
+      <p class="text-xs text-gray-500 mt-1">Registry file this site is reading: <code class="bg-gray-100 px-1 rounded">${esc(MASTER_REGISTRY_FILE_ID)}</code> — compare this EXACT ID, character for character, against the one shown on the Platform Admin site's header. If they don't match, this device/deployment is reading a different (likely old/test) registry — re-upload the current public script.js here.</p>
     </div>
     <div class="mt-4 pt-4 border-t">
       <h3 class="font-bold text-[var(--navy)] mb-1">🔒 About security</h3>
