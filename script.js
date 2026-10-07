@@ -278,7 +278,7 @@ function renderApprovalGate(){
 
 let driveTokenClient=null, driveAccessToken=null, driveConnectedEmail=null, driveLastSync=null, driveAutoTimer=null;
 function driveConfigured(){ return GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.includes('PASTE') && GOOGLE_API_KEY && !GOOGLE_API_KEY.includes('PASTE'); }
-function driveSetFileId(id){ DRIVE_FILE_ID = id; localStorage.setItem('bfhs_drive_file_id', id); }
+function driveSetFileId(id){ DRIVE_FILE_ID = id; localStorage.setItem('bfhs_drive_file_id', id); refreshApprovalStatus(); }
 function driveInitTokenClient(){
   if(driveTokenClient || !window.google || !google.accounts) return;
   driveTokenClient = google.accounts.oauth2.initTokenClient({
@@ -291,7 +291,7 @@ function driveInitTokenClient(){
         .then(r=>{ if(!r.ok) throw new Error('Could not read your Google account info (status '+r.status+').'); return r.json(); })
         .then(p=>{
           driveConnectedEmail = p.email;
-          if(!DRIVE_FILE_ID) driveCreateFile(); else drivePullNow(true).then(render);
+          if(!DRIVE_FILE_ID) driveCreateFile(); else refreshApprovalStatus().then(()=>drivePullNow(true)).then(render);
         })
         .catch(e=>alert('Google Drive sign-in failed: '+e.message));
     }
@@ -407,8 +407,11 @@ function renderCloudSyncPanel(){
 setInterval(()=>{
   const tag = document.activeElement && document.activeElement.tagName;
   if(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA') return; // don't disrupt typing
-  if(SESSION && SESSION.role==='parent'){ driveParentPull(true).then(()=>{ if(SESSION) render(); }); }
-  else if(driveAccessToken && DRIVE_FILE_ID){ drivePullNow(true).then(()=>{ if(SESSION) render(); }); }
+  refreshApprovalStatus().then(()=>{
+    if(SESSION && SESSION.role==='parent'){ driveParentPull(true).then(()=>{ if(SESSION) render(); }); }
+    else if(driveAccessToken && DRIVE_FILE_ID){ drivePullNow(true).then(()=>{ if(SESSION) render(); }); }
+    else if(SESSION){ render(); } // catches a plan that just expired/got denied, even with nothing else to sync
+  });
 }, 25000);
 
 /* ---------------------------- SESSION ---------------------------- */
