@@ -197,7 +197,31 @@ function refreshApprovalStatus(){
        because a check quietly failed. */
     .catch(()=>{ APPROVAL_STATE={status:'pending', entry:null, checkedAt:new Date(), checkFailed:true}; });
 }
-function checkApprovalStatus(){ refreshApprovalStatus().then(render); }
+let GATE_SHOWN=false, GATE_CHECKING=false, GATE_MSG='', WELCOME_PENDING=false;
+function checkApprovalStatus(){
+  GATE_CHECKING=true; GATE_MSG=''; render();
+  refreshApprovalStatus().then(()=>{
+    GATE_CHECKING=false;
+    const st = APPROVAL_STATE.status;
+    if(APPROVAL_STATE.checkFailed) GATE_MSG='⚠️ Could not reach the server — check your internet connection and try again.';
+    else if(st==='pending') GATE_MSG='Still pending — the admin has not approved this School ID yet.';
+    else if(st==='denied') GATE_MSG='The admin has declined this request.';
+    else if(st==='expired') GATE_MSG='This plan has expired.';
+    else GATE_MSG='';
+    render();
+  });
+}
+function copySchoolId(){
+  const done=()=>alert('School ID copied.');
+  if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(DRIVE_FILE_ID).then(done,()=>prompt('Copy your School ID:',DRIVE_FILE_ID));
+  else prompt('Copy your School ID:',DRIVE_FILE_ID);
+}
+function openDashboardAfterApproval(){ WELCOME_PENDING=false; render(); }
+/* While the approval screen is up, re-check every 10s on its own (not blocked by a focused
+   dropdown like the general 25s sync is), so the moment the admin approves, this updates. */
+setInterval(()=>{
+  if(GATE_SHOWN && !GATE_CHECKING && SESSION){ refreshApprovalStatus().then(()=>render()); }
+}, 10000);
 const OWNER_WHATSAPP = ''; // optional: your WhatsApp number with country code, digits only (e.g. 923001234567) — if blank, WhatsApp opens its normal "choose a contact" screen
 function approvalRequestText(schoolName, gmail){
   return `New School Registration\n\nSchool Name: ${schoolName}\nHeadmaster Gmail: ${gmail||'(not set)'}\nSchool File ID: ${DRIVE_FILE_ID}\nRequested Plan: ${planByKey(REQUESTED_PLAN).label}`;
@@ -218,17 +242,70 @@ function copyApprovalRequest(){
   if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, ()=>prompt('Copy this and send it to '+OWNER_CONTACT_EMAIL+':', text));
   else prompt('Copy this and send it to '+OWNER_CONTACT_EMAIL+':', text);
 }
+/* Shared "where does my request stand?" panel: 3-step tracker, the School ID the admin must
+   approve, when it was last checked, and the result of the last manual check. */
+function gateStatusPanel(){
+  const st = APPROVAL_STATE.status;
+  const stepCls = (on,done)=> done ? 'bg-green-600 text-white' : on ? 'bg-amber-400 text-[#081235] animate-pulse' : 'bg-gray-200 text-gray-500';
+  const bad = st==='denied'||st==='expired';
+  const steps = [
+    {n:'1',t:'Registered', on:false, done:true},
+    {n:'2',t:bad?(st==='denied'?'Declined':'Expired'):'Under review', on:!bad, done:false, bad},
+    {n:'3',t:'Approved', on:false, done:false}
+  ];
+  const tracker = steps.map((x,i)=>`
+    <div class="flex flex-col items-center flex-1 min-w-0">
+      <div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${x.bad?'bg-red-600 text-white':stepCls(x.on,x.done)}">${x.done?'✓':x.bad?'✕':x.n}</div>
+      <div class="text-[11px] mt-1 ${x.bad?'text-red-600 font-bold':x.on?'font-bold text-[var(--navy)]':'text-gray-500'}">${x.t}</div>
+    </div>${i<2?'<div class="flex-none w-6 h-0.5 bg-gray-300 mt-4"></div>':''}`).join('');
+  const label = {pending:'⏳ Pending approval', denied:'🚫 Declined', expired:'⌛ Plan expired', unknown:'… Checking'}[st] || st;
+  const labelCls = st==='denied'||st==='expired' ? 'text-red-600' : 'text-amber-600';
+  return `
+    <div class="flex items-start justify-center gap-1 mb-3">${tracker}</div>
+    <div class="rounded-lg border p-3 text-left text-sm space-y-1">
+      <div>Status: <b class="${labelCls}">${label}</b></div>
+      <div class="text-xs text-gray-500">Last checked: ${APPROVAL_STATE.checkedAt?APPROVAL_STATE.checkedAt.toLocaleTimeString():'—'} · re-checks automatically every 10 seconds</div>
+      <div class="text-xs text-gray-500 flex items-center gap-2 flex-wrap">School ID: <code class="bg-gray-100 px-1 rounded break-all">${esc(DRIVE_FILE_ID)}</code>
+        <button onclick="copySchoolId()" class="underline text-[var(--navy)]">copy</button></div>
+    </div>
+    ${GATE_CHECKING?'<p class="text-sm text-gray-600 mt-2">🔄 Checking with the admin…</p>':''}
+    ${(!GATE_CHECKING&&GATE_MSG)?`<p class="text-sm mt-2 ${APPROVAL_STATE.checkFailed||st==='denied'||st==='expired'?'text-red-600':'text-amber-700'} font-bold">${esc(GATE_MSG)}</p>`:''}`;
+}
+function gateCheckButton(){
+  return `<button onclick="checkApprovalStatus()" ${GATE_CHECKING?'disabled':''} class="gold-btn rounded-lg px-5 py-2 font-bold mt-2 ${GATE_CHECKING?'opacity-60':''}">${GATE_CHECKING?'Checking…':'🔄 Check Approval Status'}</button>`;
+}
+function renderApprovalWelcome(){
+  const e = APPROVAL_STATE.entry||{};
+  return `
+  <div class="min-h-screen flex items-center justify-center p-4">
+    <div class="w-full max-w-md doc-frame">
+      <div class="doc-topbar"></div>
+      <div class="doc-arc"><div class="doc-shield">✅</div><div class="doc-title" style="font-size:1.3rem;">Approved!</div><div class="doc-subtitle">Your school is now active</div></div>
+      <div class="p-6 text-center space-y-3">
+        <div class="rounded-lg border p-3 text-sm text-left space-y-1">
+          <div>Plan: <b>${esc(e.planLabel||'Active')}</b></div>
+          <div>${e.expiryDate?`Valid until: <b>${esc(e.expiryDate)}</b>`:'Validity: <b>Lifetime</b>'}</div>
+        </div>
+        <p class="text-gray-700 text-sm">Thank you for registering. You can now use the full dashboard.</p>
+        <button onclick="openDashboardAfterApproval()" class="navy-btn rounded-lg px-6 py-2.5 font-bold">Open Dashboard →</button>
+      </div>
+      <div class="doc-footer"><span class="lead">Learn Today</span><span class="lead2">Lead Tomorrow</span></div>
+    </div>
+  </div>`;
+}
 function renderApprovalGate(){
   if(APPROVAL_STATE.status==='denied'){
     return `
     <div class="min-h-screen flex items-center justify-center p-4">
       <div class="w-full max-w-md doc-frame">
         <div class="doc-topbar"></div>
-        <div class="doc-arc"><div class="doc-shield">🚫</div><div class="doc-title" style="font-size:1.3rem;">Access Denied</div><div class="doc-subtitle">This is a paid service</div></div>
+        <div class="doc-arc"><div class="doc-shield">🚫</div><div class="doc-title" style="font-size:1.3rem;">Access Declined</div><div class="doc-subtitle">This is a paid service</div></div>
         <div class="p-6 text-center space-y-3">
-          <p class="text-gray-700">Please contact us to purchase access before using this school management system.</p>
+          ${gateStatusPanel()}
+          <p class="text-gray-700 text-sm">Please contact us to purchase access before using this school management system.</p>
           <p class="font-bold text-[var(--navy)]">📧 ${esc(OWNER_CONTACT_EMAIL)}</p>
-          <button onclick="logout()" class="bg-gray-200 rounded-lg px-5 py-2 font-bold mt-2">⬅️ Back to Login</button>
+          ${gateCheckButton()}
+          <button onclick="logout()" class="text-sm text-gray-500 underline mt-2 block mx-auto">⬅️ Back to Login</button>
         </div>
         <div class="doc-footer"><span class="lead">Learn Today</span><span class="lead2">Lead Tomorrow</span></div>
       </div>
@@ -242,10 +319,11 @@ function renderApprovalGate(){
         <div class="doc-topbar"></div>
         <div class="doc-arc"><div class="doc-shield">⌛</div><div class="doc-title" style="font-size:1.3rem;">Subscription Expired</div></div>
         <div class="p-6 text-center space-y-3">
-          <p class="text-gray-700">Your <b>${esc(e.planLabel||'plan')}</b> expired on <b>${esc(e.expiryDate||'')}</b>. Please renew to continue using the dashboard.</p>
+          ${gateStatusPanel()}
+          <p class="text-gray-700 text-sm">Your <b>${esc(e.planLabel||'plan')}</b> expired on <b>${esc(e.expiryDate||'')}</b>. Please renew to continue using the dashboard.</p>
           <p class="font-bold text-[var(--navy)]">📧 ${esc(OWNER_CONTACT_EMAIL)}</p>
-          <button onclick="checkApprovalStatus()" class="gold-btn rounded-lg px-5 py-2 font-bold mt-2">🔄 Check Status</button>
-          <button onclick="logout()" class="bg-gray-200 rounded-lg px-5 py-2 font-bold mt-2 block mx-auto">⬅️ Back to Login</button>
+          ${gateCheckButton()}
+          <button onclick="logout()" class="text-sm text-gray-500 underline mt-2 block mx-auto">⬅️ Back to Login</button>
         </div>
         <div class="doc-footer"><span class="lead">Learn Today</span><span class="lead2">Lead Tomorrow</span></div>
       </div>
@@ -259,7 +337,8 @@ function renderApprovalGate(){
       <div class="doc-topbar"></div>
       <div class="doc-arc"><div class="doc-shield">⏳</div><div class="doc-title" style="font-size:1.3rem;">Awaiting Approval</div></div>
       <div class="p-6 text-center space-y-3">
-        <p class="text-gray-700">This school's registration needs to be approved before the dashboard opens.</p>
+        ${gateStatusPanel()}
+        <p class="text-gray-700 text-sm">If you haven't yet, send your request so the admin knows which school to approve:</p>
         <div class="text-left">
           <label class="block text-xs font-bold text-gray-500 mb-1">Plan you'd like</label>
           <select onchange="setRequestedPlan(this.value)" class="w-full border rounded-lg px-3 py-2 text-sm">
@@ -272,7 +351,7 @@ function renderApprovalGate(){
           <button onclick="copyApprovalRequest()" class="bg-gray-200 rounded-lg px-5 py-2 font-bold">📋 Copy Request Details</button>
         </div>
         <p class="text-xs text-gray-500">Or send these details yourself to <b>${esc(OWNER_CONTACT_EMAIL)}</b> from any email — <a href="${links.mailto}" class="underline">open in your mail app</a>.</p>
-        <button onclick="checkApprovalStatus()" class="gold-btn rounded-lg px-5 py-2 font-bold mt-2">🔄 Check Approval Status</button>
+        ${gateCheckButton()}
         <button onclick="logout()" class="text-sm text-gray-500 underline mt-2 block mx-auto">⬅️ Back to Login</button>
         <p class="text-xs text-gray-400 mt-2">Questions? 📧 ${esc(OWNER_CONTACT_EMAIL)}</p>
       </div>
@@ -437,7 +516,7 @@ setInterval(()=>{
 /* ---------------------------- SESSION ---------------------------- */
 let SESSION = JSON.parse(sessionStorage.getItem('bfhs_session')||'null');
 function setSession(s){ SESSION=s; sessionStorage.setItem('bfhs_session', JSON.stringify(s)); }
-function logout(){ SESSION=null; sessionStorage.removeItem('bfhs_session'); render(); }
+function logout(){ SESSION=null; GATE_SHOWN=false; WELCOME_PENDING=false; GATE_MSG=''; sessionStorage.removeItem('bfhs_session'); render(); }
 
 /* ---------------------------- HELPERS ---------------------------- */
 function uid(){ return 'id'+Math.random().toString(36).slice(2,10); }
@@ -2751,9 +2830,12 @@ function renderParent(){
 function render(){
   if(!SESSION){ renderLogin(); return; }
   if(registryConfigured() && DRIVE_FILE_ID && APPROVAL_STATE.status!=='approved'){
+    GATE_SHOWN = true;
     document.getElementById('app').innerHTML = renderApprovalGate();
     return;
   }
+  if(GATE_SHOWN){ GATE_SHOWN=false; WELCOME_PENDING=true; }   // was waiting, now approved
+  if(WELCOME_PENDING){ document.getElementById('app').innerHTML = renderApprovalWelcome(); return; }
   if(SESSION.role==='headmaster') renderHeadmaster();
   else if(SESSION.role==='teacher') renderTeacher();
   else if(SESSION.role==='parent') renderParent();
