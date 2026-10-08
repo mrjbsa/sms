@@ -184,13 +184,18 @@ function setRequestedPlan(v){ REQUESTED_PLAN=v; }
 function registryConfigured(){ return !!(MASTER_REGISTRY_FILE_ID && !MASTER_REGISTRY_FILE_ID.includes('PASTE')); }
 function refreshApprovalStatus(){
   if(!registryConfigured() || !DRIVE_FILE_ID){ APPROVAL_STATE={status:'approved', entry:null, checkedAt:new Date()}; return Promise.resolve(); }
-  return fetch(`https://www.googleapis.com/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`)
+  /* cache-busting + no-store so a stale cached copy of the registry can never be
+     mistaken for the real thing */
+  return fetch(`https://www.googleapis.com/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}&_=${Date.now()}`, {cache:'no-store'})
     .then(r=>{ if(!r.ok) throw new Error('registry fetch failed'); return r.json(); })
     .then(reg=>{
       const entry = (reg.schools||{})[DRIVE_FILE_ID] || null;
       APPROVAL_STATE = {status: effectiveStatus(entry), entry, checkedAt:new Date()};
     })
-    .catch(()=>{ if(APPROVAL_STATE.status==='unknown') APPROVAL_STATE={status:'pending', entry:null, checkedAt:new Date()}; });
+    /* FAIL CLOSED: if the registry can't be read for ANY reason, never keep trusting an
+       earlier "approved" — drop back to pending so a paid gate can't be bypassed just
+       because a check quietly failed. */
+    .catch(()=>{ APPROVAL_STATE={status:'pending', entry:null, checkedAt:new Date(), checkFailed:true}; });
 }
 function checkApprovalStatus(){ refreshApprovalStatus().then(render); }
 const OWNER_WHATSAPP = ''; // optional: your WhatsApp number with country code, digits only (e.g. 923001234567) — if blank, WhatsApp opens its normal "choose a contact" screen
@@ -286,6 +291,14 @@ function driveInitTokenClient(){
     scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email',
     callback: (resp)=>{
       if(resp.error){ alert('Google sign-in failed: '+resp.error); return; }
+      /* Google's consent screen lets the user untick the Drive checkbox. If that happens
+         the token has no Drive access and every file call fails with "insufficient
+         authentication scopes" — catch it here with a clear instruction instead. */
+      if(!google.accounts.oauth2.hasGrantedAllScopes(resp, 'https://www.googleapis.com/auth/drive.file')){
+        alert('Google Drive permission was not granted.\n\nOn the Google screen, please TICK the checkbox that says "See, edit, create and delete only the specific Google Drive files you use with this app", then press Continue.\n\nClick Connect Google Drive and try again.');
+        driveAccessToken = null;
+        return;
+      }
       driveAccessToken = resp.access_token;
       fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{Authorization:'Bearer '+driveAccessToken}})
         .then(r=>{ if(!r.ok) throw new Error('Could not read your Google account info (status '+r.status+').'); return r.json(); })
@@ -402,6 +415,7 @@ function renderCloudSyncPanel(){
       <h3 class="font-bold text-[var(--navy)] mb-1">⚙️ Platform Approval Gate</h3>
       <p class="text-xs ${registryConfigured()?'text-green-600':'text-red-600'} font-bold mb-1">${registryConfigured() ? '✅ ON — new schools need admin approval before their dashboard opens.' : '🚫 OFF — anyone who connects Google Drive gets in immediately, no approval needed.'}</p>
       <p class="text-xs text-gray-500">This school's current status: <b>${esc(APPROVAL_STATE.status)}</b>${APPROVAL_STATE.checkedAt?` (checked ${APPROVAL_STATE.checkedAt.toLocaleTimeString()})`:''}.</p>
+      ${APPROVAL_STATE.checkFailed?'<p class="text-xs text-red-600 font-bold mt-1">⚠️ The last check could not read the registry file (network, API key or sharing problem) — treated as NOT approved until it succeeds.</p>':''}
       <p class="text-xs text-gray-500 mt-1">Registry file this site is reading: <code class="bg-gray-100 px-1 rounded">${esc(MASTER_REGISTRY_FILE_ID)}</code> — compare this EXACT ID, character for character, against the one shown on the Platform Admin site's header. If they don't match, this device/deployment is reading a different (likely old/test) registry — re-upload the current public script.js here.</p>
     </div>
     <div class="mt-4 pt-4 border-t">
