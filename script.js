@@ -55,7 +55,7 @@ function defaultDB(){
       classes: DEFAULT_CLASSES.slice(),
       year:'2024-2025',
       timetable:null, // generated array
-      headmasterAccount:null, // {name,password,gmail,gmailPassword} set on first run
+      headmasterAccount:null, // {name,password,gmail} (gmail is auto-set from the connected Google account) set on first run
       classFee:{}   // {cls: monthlyAmount} — set by Headmaster in Fees tab
     },
     teachers:[],   // {id,name,subject,cls,password}
@@ -421,6 +421,16 @@ function driveInitTokenClient(){
         .then(r=>{ if(!r.ok) throw new Error('Could not read your Google account info (status '+r.status+').'); return r.json(); })
         .then(p=>{
           driveConnectedEmail = p.email;
+          /* Headmaster's backup Gmail = the Google account they just connected (never a teacher's).
+             Also scrub any Gmail password stored by older versions — it is never needed. */
+          try{
+            const hm = DB.config && DB.config.headmasterAccount;
+            if(hm){
+              if('gmailPassword' in hm) delete hm.gmailPassword;
+              if(typeof SESSION!=='undefined' && SESSION && SESSION.role==='headmaster') hm.gmail = p.email;
+              saveDB();
+            }
+          }catch(e){}
           if(!DRIVE_FILE_ID) driveCreateFile(); else refreshApprovalStatus().then(()=>drivePullNow(true)).then(render);
         })
         .catch(e=>alert('Google Drive sign-in failed: '+e.message));
@@ -1077,11 +1087,7 @@ function selectRole(role){
         <input id="hmNewPass" type="password" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="Choose a password">
         <label class="block text-sm font-bold mb-1">Confirm Password</label>
         <input id="hmNewPass2" type="password" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="Re-enter password">
-        <p class="text-xs text-gray-500 mb-2">Only your Name and Password are needed to log in every time. Add your Gmail below once so records can be backed up/emailed — you won't be asked for it again at login (you can change it later from School Setup).</p>
-        <label class="block text-sm font-bold mb-1">Gmail (for backups)</label>
-        <input id="hmNewGmail" type="email" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="you@gmail.com">
-        <label class="block text-sm font-bold mb-1">Gmail Password</label>
-        <input id="hmNewGmailPass" type="password" class="w-full border rounded-lg px-3 py-2" placeholder="Your Gmail account password">`;
+        <p class="text-xs text-gray-500">Only your Name and Password are needed to log in. Your Gmail is added automatically when you connect Google Drive (Cloud Sync) — nothing else to type.</p>`;
     } else {
       box.innerHTML = `<label class="block text-sm font-bold mb-1">Headmaster Name</label>
         <input id="loginName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="Enter your name">
@@ -1113,12 +1119,11 @@ function doLogin(){
       const name = document.getElementById('hmNewName').value.trim();
       const p1 = document.getElementById('hmNewPass').value;
       const p2 = document.getElementById('hmNewPass2').value;
-      const gmail = document.getElementById('hmNewGmail').value.trim();
-      const gmailPass = document.getElementById('hmNewGmailPass').value;
+      const gmail = (typeof driveConnectedEmail!=='undefined' && driveConnectedEmail) ? driveConnectedEmail : '';
       if(!name || !p1){ showErr('Please enter your name and a password.'); return; }
       if(p1.length<4){ showErr('Password should be at least 4 characters.'); return; }
       if(p1!==p2){ showErr('Passwords do not match.'); return; }
-      DB.config.headmasterAccount = {name, password:p1, gmail, gmailPassword:gmailPass};
+      DB.config.headmasterAccount = {name, password:p1, gmail};
       saveDB();
       setSession({role:'headmaster'}); render(); return;
     }
@@ -1304,13 +1309,10 @@ function hmSetup(){
 
     <hr class="my-4">
     <h3 class="font-bold text-[var(--navy)] mb-2">Gmail (used only for backup emails)</h3>
-    <p class="text-sm text-gray-600 mb-3">Currently: <b>${esc(c.headmasterAccount?.gmail||'not set')}</b>. Update it any time — this does not change your login Name or Password.</p>
-    <div class="grid md:grid-cols-2 gap-3">
-      <input id="hmNewGmail_" type="email" placeholder="Gmail address" value="${esc(c.headmasterAccount?.gmail||'')}" class="border rounded-lg px-3 py-2">
-      <input id="hmNewGmailPass_" type="password" placeholder="Gmail password" class="border rounded-lg px-3 py-2">
-    </div>
-    <button onclick="changeHmGmail()" class="navy-btn rounded-lg px-5 py-2 mt-3 font-bold">Save Gmail</button>
-    <span id="hmGmailMsg" class="ml-3 text-sm font-bold hidden"></span>
+    ${driveConnectedEmail||c.headmasterAccount?.gmail
+      ? `<p class="text-sm text-gray-600 mb-2">Set automatically from your connected Google account — nothing to type.</p>
+         <div class="bg-gray-100 rounded-lg px-3 py-2 text-sm font-bold">${esc(driveConnectedEmail||c.headmasterAccount?.gmail)}</div>`
+      : `<p class="text-sm text-gray-600 mb-2">Not set yet. Go to <b>Cloud Sync</b> and connect Google Drive — your Gmail is filled in automatically.</p>`}
 
     <hr class="my-4">
     <h3 class="font-bold text-[var(--navy)] mb-2">Change Your Name</h3>
@@ -1418,19 +1420,6 @@ function deleteHmAccount(){
   saveDB();
   logout();
 }
-function changeHmGmail(){
-  const gmail = document.getElementById('hmNewGmail_').value.trim();
-  const gmailPass = document.getElementById('hmNewGmailPass_').value;
-  const msg = document.getElementById('hmGmailMsg');
-  msg.classList.remove('hidden');
-  if(!gmail){ msg.textContent='Please enter a Gmail address.'; msg.className='ml-3 text-sm font-bold text-red-600'; return; }
-  DB.config.headmasterAccount.gmail = gmail;
-  if(gmailPass) DB.config.headmasterAccount.gmailPassword = gmailPass;
-  saveDB();
-  msg.textContent='Gmail updated!'; msg.className='ml-3 text-sm font-bold text-green-600';
-  setTimeout(()=>render(),900);
-}
-
 function hmTimetable(){
   const c = DB.config;
   return `
