@@ -190,7 +190,11 @@ function refreshApprovalStatus(){
   if(!registryConfigured() || !DRIVE_FILE_ID){ APPROVAL_STATE={status:'approved', entry:null, checkedAt:new Date()}; return Promise.resolve(); }
   /* cache:'no-store' already bypasses the browser cache — no extra query parameter needed
      (an unknown parameter can make Google's API reject the request). */
-  return fetch(`https://www.googleapis.com/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`, {cache:'no-store'})
+  /* A plain fetch (no options) is a CORS "simple request" — no preflight. cache:'no-store' adds a
+     Cache-Control header, which forces a preflight that can fail ("Failed to fetch"). Drive already
+     answers with max-age=0, so nothing stale is served. The no-store variant stays as a fallback. */
+  const regUrl = `https://www.googleapis.com/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`;
+  return fetch(regUrl).catch(()=>fetch(regUrl, {cache:'no-store'}))
     .then(r=>{
       if(r.ok) return r.json();
       return r.text().then(t=>{ let m=''; try{ m=((JSON.parse(t).error)||{}).message||''; }catch(e){} throw new Error('HTTP '+r.status+(m?' — '+m:'')); });
@@ -202,7 +206,7 @@ function refreshApprovalStatus(){
     })
     /* FAIL CLOSED but HONEST: access stays blocked, yet the status is "error" (a connection/setup
        problem) — never dressed up as "pending", which would wrongly suggest the admin has not decided. */
-    .catch(e=>{ APPROVAL_STATE={status:'error', entry:null, checkedAt:new Date(), checkFailed:true, detail:(e&&e.message)||'network error'}; });
+    .catch(e=>{ APPROVAL_STATE={status:'error', entry:null, checkedAt:new Date(), checkFailed:true, detail:(/failed to fetch|networkerror|load failed/i.test((e&&e.message)||'') ? 'Failed to fetch — the admin must open the Platform Admin panel once (it re-shares the registry file publicly), or check the API key restrictions' : ((e&&e.message)||'network error'))}; });
 }
 let GATE_SHOWN=false, GATE_CHECKING=false, GATE_MSG='', WELCOME_PENDING=false;
 function checkApprovalStatus(){
