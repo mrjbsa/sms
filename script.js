@@ -13,6 +13,8 @@ const PERIOD_COLORS = ['#16a34a','#2563eb','#dc2626','#7c3aed','#ea580c','#0d948
 const PERIOD_ICONS  = ['📗','📘','📕','📙','📓','📒','📚','📖'];
 const DEFAULT_SUBJECTS = ['English','Mathematics','Science','Urdu','Social Studies','Computer'];
 const DEFAULT_CLASSES  = ['1st','2nd','3rd','4th','5th','6th','7th','8th','9th','10th'];
+/* A school can teach anywhere from 1st up to 12th at most; the Headmaster picks the highest class in School Setup. */
+const ALL_CLASSES = ['1st','2nd','3rd','4th','5th','6th','7th','8th','9th','10th','11th','12th'];
 const EXAMS = [{key:'pt1',label:'PT-1'},{key:'pt2',label:'PT-2'},{key:'mid',label:'Mid Term'},{key:'final',label:'Final Term'}];
 
 /* ============================================================
@@ -63,6 +65,8 @@ function defaultDB(){
     marks:{},      // studentId -> { subject: {pt1,pt2,mid,final} } (null = not entered yet)
     announcements:[], // {id,title,date,category,audience,short,detail} — Headmaster-authored; Pakistan's fixed holidays are added automatically, not stored here
     fees:{},       // studentId -> { 'YYYY-MM': {amount,status:'Paid'/'Unpaid',paidOn} }
+    certificates:[], // issued certificates: {id,serial,type,studentId,issuedOn,student:{...snapshot},data:{...}}
+    alumni:[],     // students who passed out of the highest class (kept for certificates/records)
     salaries:{},   // teacherId -> { 'YYYY-MM': {amount,status:'Paid'/'Unpaid',paidOn} } — same pattern as fees
     homework:[]    // {id,cls,subject,title,description,dateAssigned,dueDate,teacherId}
   };
@@ -184,18 +188,21 @@ function setRequestedPlan(v){ REQUESTED_PLAN=v; }
 function registryConfigured(){ return !!(MASTER_REGISTRY_FILE_ID && !MASTER_REGISTRY_FILE_ID.includes('PASTE')); }
 function refreshApprovalStatus(){
   if(!registryConfigured() || !DRIVE_FILE_ID){ APPROVAL_STATE={status:'approved', entry:null, checkedAt:new Date()}; return Promise.resolve(); }
-  /* cache-busting + no-store so a stale cached copy of the registry can never be
-     mistaken for the real thing */
-  return fetch(`https://www.googleapis.com/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}&_=${Date.now()}`, {cache:'no-store'})
-    .then(r=>{ if(!r.ok) throw new Error('registry fetch failed'); return r.json(); })
-    .then(reg=>{
-      const entry = (reg.schools||{})[DRIVE_FILE_ID] || null;
-      APPROVAL_STATE = {status: effectiveStatus(entry), entry, checkedAt:new Date()};
+  /* cache:'no-store' already bypasses the browser cache — no extra query parameter needed
+     (an unknown parameter can make Google's API reject the request). */
+  return fetch(`https://www.googleapis.com/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`, {cache:'no-store'})
+    .then(r=>{
+      if(r.ok) return r.json();
+      return r.text().then(t=>{ let m=''; try{ m=((JSON.parse(t).error)||{}).message||''; }catch(e){} throw new Error('HTTP '+r.status+(m?' — '+m:'')); });
     })
-    /* FAIL CLOSED: if the registry can't be read for ANY reason, never keep trusting an
-       earlier "approved" — drop back to pending so a paid gate can't be bypassed just
-       because a check quietly failed. */
-    .catch(()=>{ APPROVAL_STATE={status:'pending', entry:null, checkedAt:new Date(), checkFailed:true}; });
+    .then(reg=>{
+      const schools = (reg && reg.schools) || {};
+      const entry = schools[DRIVE_FILE_ID] || null;
+      APPROVAL_STATE = {status: effectiveStatus(entry), entry, listed:!!entry, registryCount:Object.keys(schools).length, checkedAt:new Date()};
+    })
+    /* FAIL CLOSED but HONEST: access stays blocked, yet the status is "error" (a connection/setup
+       problem) — never dressed up as "pending", which would wrongly suggest the admin has not decided. */
+    .catch(e=>{ APPROVAL_STATE={status:'error', entry:null, checkedAt:new Date(), checkFailed:true, detail:(e&&e.message)||'network error'}; });
 }
 let GATE_SHOWN=false, GATE_CHECKING=false, GATE_MSG='', WELCOME_PENDING=false;
 function checkApprovalStatus(){
@@ -203,8 +210,8 @@ function checkApprovalStatus(){
   refreshApprovalStatus().then(()=>{
     GATE_CHECKING=false;
     const st = APPROVAL_STATE.status;
-    if(APPROVAL_STATE.checkFailed) GATE_MSG='⚠️ Could not reach the server — check your internet connection and try again.';
-    else if(st==='pending') GATE_MSG='Still pending — the admin has not approved this School ID yet.';
+    if(st==='error') GATE_MSG='⚠️ Could not verify: '+(APPROVAL_STATE.detail||'connection problem')+' — this is not a decision about your school.';
+    else if(st==='pending') GATE_MSG = APPROVAL_STATE.listed ? 'Still pending — the admin has your School ID but has not approved it yet.' : 'Not approved yet — the admin has not added this School ID.';
     else if(st==='denied') GATE_MSG='The admin has declined this request.';
     else if(st==='expired') GATE_MSG='This plan has expired.';
     else GATE_MSG='';
@@ -246,20 +253,31 @@ function copyApprovalRequest(){
    approve, when it was last checked, and the result of the last manual check. */
 function gateStatusPanel(){
   const st = APPROVAL_STATE.status;
-  const stepCls = (on,done)=> done ? 'bg-green-600 text-white' : on ? 'bg-amber-400 text-[#081235] animate-pulse' : 'bg-gray-200 text-gray-500';
+  const isErr = st==='error';
   const bad = st==='denied'||st==='expired';
+  const stepCls = (on,done)=> done ? 'bg-green-600 text-white' : on ? 'bg-amber-400 text-[#081235] animate-pulse' : 'bg-gray-200 text-gray-500';
+  const mid = bad ? (st==='denied'?'Declined':'Expired') : isErr ? 'Can’t verify' : 'Under review';
   const steps = [
     {n:'1',t:'Registered', on:false, done:true},
-    {n:'2',t:bad?(st==='denied'?'Declined':'Expired'):'Under review', on:!bad, done:false, bad},
+    {n:'2',t:mid, on:!bad&&!isErr, done:false, bad, warn:isErr},
     {n:'3',t:'Approved', on:false, done:false}
   ];
   const tracker = steps.map((x,i)=>`
     <div class="flex flex-col items-center flex-1 min-w-0">
-      <div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${x.bad?'bg-red-600 text-white':stepCls(x.on,x.done)}">${x.done?'✓':x.bad?'✕':x.n}</div>
-      <div class="text-[11px] mt-1 ${x.bad?'text-red-600 font-bold':x.on?'font-bold text-[var(--navy)]':'text-gray-500'}">${x.t}</div>
+      <div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${x.bad?'bg-red-600 text-white':x.warn?'bg-orange-500 text-white':stepCls(x.on,x.done)}">${x.done?'✓':x.bad?'✕':x.warn?'!':x.n}</div>
+      <div class="text-[11px] mt-1 ${x.bad?'text-red-600 font-bold':x.warn?'text-orange-600 font-bold':x.on?'font-bold text-[var(--navy)]':'text-gray-500'}">${x.t}</div>
     </div>${i<2?'<div class="flex-none w-6 h-0.5 bg-gray-300 mt-4"></div>':''}`).join('');
-  const label = {pending:'⏳ Pending approval', denied:'🚫 Declined', expired:'⌛ Plan expired', unknown:'… Checking'}[st] || st;
-  const labelCls = st==='denied'||st==='expired' ? 'text-red-600' : 'text-amber-600';
+  const label = st==='pending' ? (APPROVAL_STATE.listed?'⏳ Pending — admin is reviewing':'⏳ Not yet reviewed by the admin')
+              : {denied:'🚫 Declined by the admin', expired:'⌛ Plan expired', error:'⚠️ Unable to verify right now', unknown:'… Checking'}[st] || st;
+  const labelCls = bad ? 'text-red-600' : isErr ? 'text-orange-600' : 'text-amber-600';
+  const n = APPROVAL_STATE.registryCount;
+  const detail = isErr
+    ? `<div class="rounded-lg border border-orange-300 bg-orange-50 p-3 text-xs text-left text-orange-800 mt-2"><b>Could not read the approval registry.</b> This is a connection or setup problem — it is <b>not</b> a decision about your school.<br>Reason: <code class="break-all">${esc(APPROVAL_STATE.detail||'unknown')}</code><br>Please send this message to the admin.</div>`
+    : st==='pending'
+      ? `<p class="text-xs text-gray-600 mt-2 text-left">${APPROVAL_STATE.listed
+          ? '✔ Registry reachable — the admin has this School ID on file and is deciding.'
+          : `Registry reachable (${n} school${n===1?'':'s'} listed) — this School ID is not listed yet. Send your request below, or ask the admin to add this exact ID.`}</p>`
+      : '';
   return `
     <div class="flex items-start justify-center gap-1 mb-3">${tracker}</div>
     <div class="rounded-lg border p-3 text-left text-sm space-y-1">
@@ -268,8 +286,9 @@ function gateStatusPanel(){
       <div class="text-xs text-gray-500 flex items-center gap-2 flex-wrap">School ID: <code class="bg-gray-100 px-1 rounded break-all">${esc(DRIVE_FILE_ID)}</code>
         <button onclick="copySchoolId()" class="underline text-[var(--navy)]">copy</button></div>
     </div>
+    ${detail}
     ${GATE_CHECKING?'<p class="text-sm text-gray-600 mt-2">🔄 Checking with the admin…</p>':''}
-    ${(!GATE_CHECKING&&GATE_MSG)?`<p class="text-sm mt-2 ${APPROVAL_STATE.checkFailed||st==='denied'||st==='expired'?'text-red-600':'text-amber-700'} font-bold">${esc(GATE_MSG)}</p>`:''}`;
+    ${(!GATE_CHECKING&&GATE_MSG)?`<p class="text-sm mt-2 ${isErr||bad?'text-red-600':'text-amber-700'} font-bold">${esc(GATE_MSG)}</p>`:''}`;
 }
 function gateCheckButton(){
   return `<button onclick="checkApprovalStatus()" ${GATE_CHECKING?'disabled':''} class="gold-btn rounded-lg px-5 py-2 font-bold mt-2 ${GATE_CHECKING?'opacity-60':''}">${GATE_CHECKING?'Checking…':'🔄 Check Approval Status'}</button>`;
@@ -494,7 +513,7 @@ function renderCloudSyncPanel(){
       <h3 class="font-bold text-[var(--navy)] mb-1">⚙️ Platform Approval Gate</h3>
       <p class="text-xs ${registryConfigured()?'text-green-600':'text-red-600'} font-bold mb-1">${registryConfigured() ? '✅ ON — new schools need admin approval before their dashboard opens.' : '🚫 OFF — anyone who connects Google Drive gets in immediately, no approval needed.'}</p>
       <p class="text-xs text-gray-500">This school's current status: <b>${esc(APPROVAL_STATE.status)}</b>${APPROVAL_STATE.checkedAt?` (checked ${APPROVAL_STATE.checkedAt.toLocaleTimeString()})`:''}.</p>
-      ${APPROVAL_STATE.checkFailed?'<p class="text-xs text-red-600 font-bold mt-1">⚠️ The last check could not read the registry file (network, API key or sharing problem) — treated as NOT approved until it succeeds.</p>':''}
+      ${APPROVAL_STATE.checkFailed?`<p class="text-xs text-red-600 font-bold mt-1">⚠️ The last check could not read the registry file: ${esc(APPROVAL_STATE.detail||'unknown')} — access stays blocked until it succeeds.</p>`:''}
       <p class="text-xs text-gray-500 mt-1">Registry file this site is reading: <code class="bg-gray-100 px-1 rounded">${esc(MASTER_REGISTRY_FILE_ID)}</code> — compare this EXACT ID, character for character, against the one shown on the Platform Admin site's header. If they don't match, this device/deployment is reading a different (likely old/test) registry — re-upload the current public script.js here.</p>
     </div>
     <div class="mt-4 pt-4 border-t">
@@ -820,8 +839,8 @@ function renderMarksheetCard(student, marksData, yearLabel){
    already loaded and stable) and the finished result is handed to the
    print window / image renderer, so both always look identical.
    ============================================================ */
-const CARD_BASE_W = {marksheetCard:700, timetableCard:560, feeVoucherCard:560, salarySlipCard:560};
-const CARD_LABEL  = {marksheetCard:'Marksheet', timetableCard:'Timetable', feeVoucherCard:'Fee-Voucher', idCard:'ID-Card', salarySlipCard:'Salary-Slip'};
+const CARD_BASE_W = {marksheetCard:700, timetableCard:560, feeVoucherCard:560, salarySlipCard:560, certificateCard:700};
+const CARD_LABEL  = {marksheetCard:'Marksheet', timetableCard:'Timetable', feeVoucherCard:'Fee-Voucher', idCard:'ID-Card', salarySlipCard:'Salary-Slip', certificateCard:'Certificate'};
 
 /* Print / image copy of a card: no editable inputs (they cut text off), no duplicate id. */
 function staticCardHtml(el){
@@ -1150,6 +1169,7 @@ const HM_TABS = [
   {key:'salary', label:'Salary', icon:'🧾'},
   {key:'homework', label:'Homework', icon:'📚'},
   {key:'idcards', label:'ID Cards', icon:'🪪'},
+  {key:'certificates', label:'Certificates', icon:'📜'},
   {key:'promotion', label:'Promotion', icon:'🎓'},
   {key:'backup', label:'Backup', icon:'💾'},
 ];
@@ -1169,6 +1189,7 @@ function renderHeadmaster(){
   if(ACTIVE_TAB==='salary') content = hmSalary();
   if(ACTIVE_TAB==='homework') content = hmHomework();
   if(ACTIVE_TAB==='idcards') content = hmIdCards();
+  if(ACTIVE_TAB==='certificates') content = hmCertificates();
   if(ACTIVE_TAB==='promotion') content = hmPromotion();
   if(ACTIVE_TAB==='backup') content = hmBackup();
   document.getElementById('app').innerHTML = shell('Headmaster', HM_TABS, ACTIVE_TAB, content);
@@ -1178,6 +1199,8 @@ function card(inner, extra=''){ return `<div class="bg-white rounded-2xl shadow 
 
 function hmSetup(){
   const c = DB.config;
+  let topIdx = Math.max(...c.classes.map(x=>ALL_CLASSES.indexOf(x)));
+  if(!(topIdx>=0)) topIdx = Math.min(Math.max(c.classes.length,1),12)-1;
   const csClass = document.getElementById('csClassSel')?.value || c.classes[0];
   return `
   <div class="space-y-5">
@@ -1200,8 +1223,14 @@ function hmSetup(){
         <input id="cfgLogo" type="file" accept="image/*" class="w-full border rounded-lg px-3 py-2"></div>
       <div><label class="block text-sm font-bold mb-1">Default Subjects (used if a class has no custom list)</label>
         <input id="cfgSubjects" value="${esc(c.subjects.join(', '))}" class="w-full border rounded-lg px-3 py-2"></div>
-      <div class="md:col-span-2"><label class="block text-sm font-bold mb-1">Classes (comma separated, order = promotion order)</label>
-        <input id="cfgClasses" value="${esc(c.classes.join(', '))}" class="w-full border rounded-lg px-3 py-2"></div>
+      <div class="md:col-span-2"><label class="block text-sm font-bold mb-1">Classes your school teaches</label>
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-sm">1st up to</span>
+          <select id="cfgTopClass" class="border rounded-lg px-3 py-2">${ALL_CLASSES.map((x,i)=>`<option value="${x}" ${i===topIdx?'selected':''}>${x}</option>`).join('')}</select>
+          <span class="text-xs text-gray-500">(maximum 12th) · currently: ${esc(c.classes.join(', '))}</span>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">Promotion follows this order, and the highest class is where students pass out. If you add 11th/12th, set their subjects in "Class-wise Subjects" below.</p>
+      </div>
     </div>
     <button onclick="saveSetup()" class="navy-btn rounded-lg px-5 py-2 mt-4 font-bold">Save Setup</button>
     <span id="setupMsg" class="ml-3 text-green-600 font-bold hidden">Saved!</span>
@@ -1281,6 +1310,14 @@ function hmSetup(){
 }
 function saveSetup(){
   const c = DB.config;
+  let newClasses = null;
+  const topSel = document.getElementById('cfgTopClass');
+  if(topSel){
+    newClasses = ALL_CLASSES.slice(0, ALL_CLASSES.indexOf(topSel.value)+1);
+    const dropped = c.classes.filter(x=>!newClasses.includes(x));
+    const orphans = DB.students.filter(st=>dropped.includes(st.cls));
+    if(orphans.length && !confirm(`${orphans.length} student(s) are in classes that would no longer exist (${[...new Set(orphans.map(st=>st.cls))].join(', ')}), so they would vanish from every class list.\n\nMove them first (Students → Edit), or press Cancel to keep the current classes.\n\nPress OK only if you really want to continue.`)) return;
+  }
   c.schoolName = document.getElementById('cfgName').value.trim() || c.schoolName;
   c.year = document.getElementById('cfgYear').value.trim();
   c.assemblyStart = document.getElementById('cfgAStart').value;
@@ -1288,7 +1325,7 @@ function saveSetup(){
   c.schoolEnd = document.getElementById('cfgEnd').value;
   c.passPercent = Number(document.getElementById('cfgPass').value)||40;
   c.subjects = document.getElementById('cfgSubjects').value.split(',').map(s=>s.trim()).filter(Boolean);
-  c.classes = document.getElementById('cfgClasses').value.split(',').map(s=>s.trim()).filter(Boolean);
+  if(newClasses) c.classes = newClasses;
   const logoInput = document.getElementById('cfgLogo');
   const finish=()=>{ saveDB(); const m=document.getElementById('setupMsg'); m.classList.remove('hidden'); setTimeout(()=>render(),900); };
   if(logoInput.files && logoInput.files[0]){
@@ -1845,6 +1882,7 @@ function hmPromotion(){
       <button onclick="applyPassPct()" class="navy-btn rounded-lg px-4 py-2 font-bold">Apply %</button>
     </div>
     <p class="text-sm text-gray-500 mb-2">Tick the students who should PASS and move up. Unticked students are marked FAIL / stay back.</p>
+    ${clsSel===classes[classes.length-1]?'<p class="text-sm text-amber-700 mb-2">🎓 This is the highest class — promoted students are moved to the Alumni list (still available in Certificates).</p>':''}
     <div class="overflow-x-auto">
     <table class="w-full text-sm">
       <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>%</th><th>Promote?</th></tr></thead>
@@ -1857,11 +1895,22 @@ function hmPromotion(){
 }
 function applyPassPct(){ DB.config.passPercent = Number(document.getElementById('promoPassPct').value)||40; saveDB(); render(); }
 function promoteClass(cls){
+  ensureCertData();
   const classes = DB.config.classes;
   const idx = classes.indexOf(cls);
-  const nextClass = idx>=0 && idx<classes.length-1 ? classes[idx+1] : cls;
-  document.querySelectorAll('.promoCheck').forEach(chk=>{
-    const stu = DB.students.find(s=>s.id===chk.dataset.id);
+  const isLast = idx>=0 && idx===classes.length-1;
+  const nextClass = idx>=0 && !isLast ? classes[idx+1] : cls;
+  const checks = [...document.querySelectorAll('.promoCheck')];
+  const chosen = checks.filter(c=>c.checked).map(c=>DB.students.find(st=>st.id===c.dataset.id)).filter(Boolean);
+  if(isLast && chosen.length){
+    const owing = chosen.filter(st=>feeSummary(st).totalDue>0);
+    let msg = `${cls} is this school's highest class.\n\n${chosen.length} selected student(s) will be marked PASSED OUT and moved to the Alumni list (their records stay available for Pass / Leaving / Character certificates).`;
+    if(owing.length) msg += `\n\n⚠️ ${owing.length} of them still have unpaid fees: ${owing.slice(0,5).map(st=>st.name).join(', ')}${owing.length>5?'…':''}`;
+    if(!confirm(msg+'\n\nContinue?')) return;
+  }
+  const passedOut = [];
+  checks.forEach(chk=>{
+    const stu = DB.students.find(st=>st.id===chk.dataset.id);
     if(!stu) return;
     if(chk.checked){
       // Archive this year's marks (never delete automatically) then start a fresh sheet for the new class/year.
@@ -1869,12 +1918,18 @@ function promoteClass(cls){
         if(!stu.marksArchive) stu.marksArchive=[];
         stu.marksArchive.push({year:DB.config.year, cls:stu.cls, marks:DB.marks[stu.id]});
       }
-      stu.cls = nextClass;
+      if(isLast){
+        DB.alumni.push(Object.assign({}, stu, {finalPct:computeOverallPct(stu), finalClass:stu.cls, passedOutOn:todayISO(), passedOutYear:DB.config.year}));
+        passedOut.push(stu.id);
+      } else {
+        stu.cls = nextClass;
+      }
       delete DB.marks[stu.id];
     } else {
       stu.remark = 'FAIL - Stayed Back';
     }
   });
+  if(passedOut.length) DB.students = DB.students.filter(st=>!passedOut.includes(st.id));
   saveDB();
   const m=document.getElementById('promoMsg'); m.classList.remove('hidden'); setTimeout(()=>render(),1200);
 }
@@ -2801,6 +2856,7 @@ const P_TABS = [
   {key:'announcements', label:'Announcements', icon:'📣'},
   {key:'timetable', label:'Timetable', icon:'🕒'},
   {key:'idcard', label:'ID Card', icon:'🪪'},
+  {key:'certificates', label:'Certificates', icon:'📜'},
   {key:'staff', label:'Staff', icon:'👥'},
 ];
 function renderParent(){
@@ -2820,6 +2876,7 @@ function renderParent(){
   if(ACTIVE_TAB==='announcements') content = renderAnnouncements('parent');
   if(ACTIVE_TAB==='timetable') content = DB.config.timetable ? renderTimetableCard({}) : card('<p class="text-gray-500 text-center py-10">Timetable not generated yet.</p>');
   if(ACTIVE_TAB==='idcard') content = pIdCard(stu);
+  if(ACTIVE_TAB==='certificates') content = renderParentCertificates(stu);
   if(ACTIVE_TAB==='staff') content = renderStaffDirectory();
   document.getElementById('app').innerHTML = shell(`Parent — ${esc(stu.name)}`, P_TABS, ACTIVE_TAB, content);
 }
@@ -2827,6 +2884,237 @@ function renderParent(){
 /* ============================================================
    ROOT RENDER
    ============================================================ */
+/* ============================================================
+   CERTIFICATES — Pass, School Leaving, Character, Participation/Achievement.
+   Every issued certificate gets a serial number and is stored with a snapshot of the
+   student's details, so it can be re-printed later exactly as issued (even after the
+   student is promoted or passes out). Headmaster issues; Parents can view/print their own.
+   ============================================================ */
+const CERT_TYPES = {
+  pass:         {label:'Pass Certificate',                         title:'CERTIFICATE OF PASS',          icon:'🏅'},
+  leaving:      {label:'School Leaving Certificate',               title:'SCHOOL LEAVING CERTIFICATE',   icon:'📜'},
+  character:    {label:'Character Certificate',                    title:'CHARACTER CERTIFICATE',        icon:'🛡️'},
+  participation:{label:'Participation / Achievement Certificate',  title:'CERTIFICATE OF PARTICIPATION', icon:'🏆'}
+};
+const EVENT_CATEGORIES = ['Sports / Game','Quiz Competition','Debate','Speech','Art / Drawing','Science Fair','Naat / Qirat','Other'];
+const EVENT_POSITIONS  = ['Participation','1st Position','2nd Position','3rd Position','Winner','Runner-up'];
+const LEAVING_REASONS  = ['Completed studies','Parents’ request','Transfer to another school','Relocation / shifting','Other'];
+const CONDUCT_LEVELS   = ['Excellent','Very Good','Good','Satisfactory'];
+let LAST_CERT_ID = null;
+
+function ensureCertData(){ if(!DB.certificates) DB.certificates=[]; if(!DB.alumni) DB.alumni=[]; }
+function certDate(iso){ if(!iso) return ''; const d=new Date(iso+'T00:00:00'); return isNaN(d)?esc(iso):d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}); }
+function certPeople(grp){ ensureCertData(); return grp==='__alumni' ? DB.alumni : DB.students.filter(st=>st.cls===grp); }
+function certFindPerson(id){ ensureCertData(); return DB.students.find(st=>st.id===id) || DB.alumni.find(st=>st.id===id) || null; }
+function certPctFor(p){ return p.finalPct!=null ? Number(p.finalPct) : studentOverallPercent(p); }
+/* Outstanding fees. For passed-out students only already-recorded months are counted
+   (feeSummary() would otherwise keep inventing new unpaid months after they left). */
+function certDues(p){
+  if(p.passedOutOn){
+    return Object.values(DB.fees[p.id]||{}).reduce((t,r)=>t+(r.status!=='Paid'?(Number(r.amount)||0):0),0);
+  }
+  return feeSummary(p).totalDue;
+}
+
+function renderCertificateCard(rec){
+  const cfg=DB.config, st=rec.student, d=rec.data||{}, T=CERT_TYPES[rec.type]||CERT_TYPES.pass;
+  const who = `<b>${esc(st.name)}</b>, S/D of <b>${esc(st.father||'—')}</b>, Roll No. <b>${esc(st.roll)}</b>`;
+  let body='';
+  if(rec.type==='pass'){
+    body = `This is to certify that ${who}, a student of <b>Class ${esc(st.cls)}</b> of this school, has <b>PASSED</b> the <b>${esc(d.exam||'Annual Examination')}</b> held in session <b>${esc(d.session||cfg.year)}</b>${d.pct!=null?`, securing <b>${Number(d.pct).toFixed(2)}%</b> marks (Grade <b>${esc(d.grade||'')}</b>)`:''}. We wish him/her every success in the future.`;
+  } else if(rec.type==='leaving'){
+    body = `This is to certify that ${who}, was a bonafide student of this school${st.admissionDate?` from <b>${certDate(st.admissionDate)}</b>`:''} to <b>${certDate(d.leaveDate)}</b>. The last class studied was <b>Class ${esc(d.lastClass||st.cls)}</b>. The reason for leaving is stated as <b>${esc(d.reason)}</b>, and his/her conduct during the stay was <b>${esc(d.conduct)}</b>. School dues: <b>${d.duesCleared?'cleared in full':`Rs. ${esc(d.duesAmount)} outstanding at the time of issue`}</b>. This certificate is issued on request.`;
+  } else if(rec.type==='character'){
+    body = `This is to certify that ${who}, is a student of <b>Class ${esc(st.cls)}</b> of this school${st.admissionDate?` since <b>${certDate(st.admissionDate)}</b>`:''}. During this period his/her character and conduct have been <b>${esc(d.conduct)}</b>, and to the best of our knowledge he/she bears a good moral character.${d.purpose?` This certificate is issued ${esc(d.purpose)}.`:''}`;
+  } else {
+    const pos = d.position||'Participation';
+    const phrase = pos==='Participation' ? 'in recognition of active participation in'
+                 : pos==='Winner' ? 'in recognition of winning'
+                 : pos==='Runner-up' ? 'in recognition of being the Runner-up in'
+                 : `in recognition of securing the <b>${esc(pos)}</b> in`;
+    body = `This certificate is proudly presented to <b>${esc(st.name)}</b>, S/D of <b>${esc(st.father||'—')}</b>, of <b>Class ${esc(st.cls)}</b>, ${phrase} the <b>${esc(d.event)}</b> (${esc(d.category)}) held on <b>${certDate(d.eventDate)}</b>${d.organizer?`, organized by <b>${esc(d.organizer)}</b>`:''}. We appreciate the effort and wish continued success.`;
+  }
+  const hmName = cfg.headmasterAccount && cfg.headmasterAccount.name || '';
+  return `
+  <div class="doc-frame max-w-2xl mx-auto" id="certificateCard" data-fname="${esc(st.name)}" style="min-height:960px;display:flex;flex-direction:column;">
+    <div class="doc-topbar"></div>
+    <div class="doc-arc">
+      <div class="doc-shield">${cfg.logo?`<img src="${cfg.logo}" class="w-full h-full object-cover rounded-lg">`:'🎓'}</div>
+      <div class="doc-title">${esc(cfg.schoolName.split(' ').slice(0,2).join(' '))}</div>
+      <div class="doc-subtitle">${esc(cfg.schoolName.split(' ').slice(2).join(' '))}</div>
+      <div class="doc-badge">★ CERTIFICATE ★</div>
+    </div>
+    <div style="flex:1;margin:18px 22px;border:4px double #f0a500;border-radius:16px;padding:26px 30px;display:flex;flex-direction:column;justify-content:space-between;background:#fffdf7;">
+      <div style="text-align:center;">
+        <div style="font-size:2.2rem;">${T.icon}</div>
+        <div style="font-family:Georgia,serif;color:#0b1a4a;font-size:1.5rem;font-weight:700;letter-spacing:2px;margin-top:4px;">${T.title}</div>
+        <div style="width:90px;height:3px;background:#f0a500;margin:10px auto 18px;border-radius:2px;"></div>
+      </div>
+      <p style="font-family:Georgia,serif;font-size:1.05rem;line-height:1.9;text-align:justify;color:#1a1a2e;margin:0;">${body}</p>
+      <div>
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:34px;text-align:center;font-family:'Trebuchet MS',sans-serif;font-size:.8rem;">
+          <div style="width:30%;"><div style="border-top:1.5px solid #0b1a4a;padding-top:4px;font-weight:700;">Class Teacher</div></div>
+          <div style="width:70px;height:70px;border:3px double #f0a500;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#0b1a4a;font-size:.6rem;font-weight:700;line-height:1.2;">SCHOOL<br>SEAL</div>
+          <div style="width:30%;"><div style="border-top:1.5px solid #0b1a4a;padding-top:4px;font-weight:700;">Principal / Headmaster</div>${hmName?`<div style="color:#666;font-size:.7rem;">${esc(hmName)}</div>`:''}</div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:16px;font-family:'Trebuchet MS',sans-serif;font-size:.75rem;color:#555;"><span>Certificate No: <b>${esc(rec.serial)}</b></span><span>Date of Issue: <b>${certDate(rec.issuedOn)}</b></span></div>
+      </div>
+    </div>
+    <div class="doc-footer">
+      <span class="lead">Learn Today</span>
+      <span class="lead2">Lead Tomorrow</span>
+    </div>
+  </div>`;
+}
+function certPreviewHtml(rec){
+  return `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('certificateCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('certificateCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` + renderCertificateCard(rec);
+}
+function viewCertificate(id){ LAST_CERT_ID=id; render(); setTimeout(()=>{ const e=document.getElementById('certPreview'); if(e) e.scrollIntoView({behavior:'smooth',block:'start'}); },50); }
+function deleteCertificate(id){
+  ensureCertData();
+  const rec = DB.certificates.find(c=>c.id===id); if(!rec) return;
+  if(!confirm(`Delete certificate ${rec.serial} for ${rec.student.name}?\n\nThis removes it from the issued list (and from the parent's view).`)) return;
+  DB.certificates = DB.certificates.filter(c=>c.id!==id);
+  if(LAST_CERT_ID===id) LAST_CERT_ID=null;
+  saveDB(); render();
+}
+
+function issueCertificate(){
+  ensureCertData();
+  const q = id=>document.getElementById(id);
+  const type = q('certType').value;
+  const p = certFindPerson(q('certStudent') && q('certStudent').value);
+  if(!p){ alert('Please select a student first.'); return; }
+  const d = {};
+  if(type==='pass'){
+    d.exam = q('cExam').value.trim() || 'Annual Examination';
+    d.session = q('cSession').value.trim() || DB.config.year;
+    const raw = q('cPct').value;
+    d.pct = raw==='' ? null : Number(raw);
+    if(d.pct!=null){
+      if(!(d.pct>=0 && d.pct<=100)){ alert('Percentage must be between 0 and 100.'); return; }
+      d.grade = grade(d.pct);
+      const need = Number(DB.config.passPercent)||40;
+      if(d.pct<need && !confirm(`${p.name} has ${d.pct}%, which is below the pass mark (${need}%).\n\nIssue a PASS certificate anyway?`)) return;
+    }
+  } else if(type==='leaving'){
+    d.leaveDate = q('cLeaveDate').value || todayISO();
+    d.reason = q('cReason').value; d.conduct = q('cConduct').value;
+    d.lastClass = q('cLastClass').value.trim() || p.cls;
+    const dues = certDues(p); d.duesCleared = dues<=0; d.duesAmount = dues;
+    if(dues>0 && !confirm(`${p.name} still has Rs. ${dues} in unpaid fees.\n\nIssue the Leaving Certificate anyway? (It will state that dues were outstanding.)`)) return;
+  } else if(type==='character'){
+    d.conduct = q('cConduct').value; d.purpose = q('cPurpose').value.trim();
+  } else {
+    d.event = q('cEvent').value.trim();
+    if(!d.event){ alert('Please enter the event name.'); return; }
+    d.category = q('cCategory').value; d.position = q('cPosition').value;
+    d.eventDate = q('cEventDate').value || todayISO(); d.organizer = q('cOrganizer').value.trim();
+  }
+  const yr = todayISO().slice(0,4);
+  const nums = DB.certificates.filter(c=>c.serial && c.serial.startsWith('CERT-'+yr+'-')).map(c=>parseInt(c.serial.split('-')[2],10)||0);
+  const n = (nums.length?Math.max(...nums):0)+1;
+  const rec = {
+    id:uid(), serial:`CERT-${yr}-${String(n).padStart(4,'0')}`, type, studentId:p.id, issuedOn:todayISO(),
+    student:{name:p.name, father:p.father||'', cls:p.cls, roll:p.roll, section:p.section||'', admissionDate:p.admissionDate||''},
+    data:d
+  };
+  DB.certificates.push(rec); LAST_CERT_ID = rec.id;
+  saveDB(); render();
+  setTimeout(()=>{ const e=document.getElementById('certPreview'); if(e) e.scrollIntoView({behavior:'smooth',block:'start'}); },50);
+}
+
+function hmCertificates(){
+  ensureCertData();
+  const q = id=>document.getElementById(id);
+  const cfg = DB.config;
+  const type = (q('certType') && q('certType').value) || 'pass';
+  const groups = [...cfg.classes, ...(DB.alumni.length?['__alumni']:[])];
+  let grp = q('certClassSel') && q('certClassSel').value; if(!groups.includes(grp)) grp = cfg.classes[0];
+  const people = certPeople(grp);
+  let pid = q('certStudent') && q('certStudent').value; if(!people.find(x=>x.id===pid)) pid = people[0] && people[0].id;
+  const p = people.find(x=>x.id===pid);
+  const opt = (arr,sel)=>arr.map(x=>`<option ${x===sel?'selected':''}>${esc(x)}</option>`).join('');
+  const inp = 'class="w-full border rounded-lg px-3 py-2"';
+  const lbl = t=>`<label class="block text-sm font-bold mb-1">${t}</label>`;
+  let fields='';
+  if(p){
+    if(type==='pass'){
+      const pct = certPctFor(p);
+      fields = `
+        <div>${lbl('Examination')}<input id="cExam" value="Annual Examination" maxlength="50" ${inp}></div>
+        <div>${lbl('Session')}<input id="cSession" value="${esc(cfg.year)}" ${inp}></div>
+        <div>${lbl('Percentage obtained <span class="font-normal text-gray-500">(auto from marks — edit if needed)</span>')}<input id="cPct" type="number" step="0.01" value="${pct>0?pct.toFixed(2):''}" ${inp}></div>`;
+    } else if(type==='leaving'){
+      const dues = certDues(p);
+      fields = `
+        <div>${lbl('Date of leaving')}<input id="cLeaveDate" type="date" value="${todayISO()}" ${inp}></div>
+        <div>${lbl('Reason for leaving')}<select id="cReason" ${inp}>${opt(LEAVING_REASONS)}</select></div>
+        <div>${lbl('Conduct')}<select id="cConduct" ${inp}>${opt(CONDUCT_LEVELS,'Good')}</select></div>
+        <div>${lbl('Class last studied')}<input id="cLastClass" value="${esc(p.finalClass||p.cls)}" maxlength="20" ${inp}></div>
+        <div class="md:col-span-2 text-sm ${dues>0?'text-red-600 font-bold':'text-green-700'}">${dues>0?`⚠️ Rs. ${dues} in school fees is still unpaid for this student — the certificate will say so.`:'✅ No outstanding school fees.'}</div>`;
+    } else if(type==='character'){
+      fields = `
+        <div>${lbl('Conduct')}<select id="cConduct" ${inp}>${opt(CONDUCT_LEVELS,'Good')}</select></div>
+        <div>${lbl('Purpose <span class="font-normal text-gray-500">(optional)</span>')}<input id="cPurpose" maxlength="80" placeholder="e.g. for admission in another school" ${inp}></div>`;
+    } else {
+      fields = `
+        <div>${lbl('Event name')}<input id="cEvent" maxlength="80" placeholder="e.g. Inter-School Quiz Competition 2026" ${inp}></div>
+        <div>${lbl('Category')}<select id="cCategory" ${inp}>${opt(EVENT_CATEGORIES)}</select></div>
+        <div>${lbl('Position / Award')}<select id="cPosition" ${inp}>${opt(EVENT_POSITIONS)}</select></div>
+        <div>${lbl('Event date')}<input id="cEventDate" type="date" value="${todayISO()}" ${inp}></div>
+        <div class="md:col-span-2">${lbl('Organized by <span class="font-normal text-gray-500">(optional)</span>')}<input id="cOrganizer" maxlength="60" placeholder="${esc(cfg.schoolName)}" ${inp}></div>`;
+    }
+  }
+  const issued = [...DB.certificates].reverse();
+  const logRows = issued.map(c=>`<tr class="border-b">
+      <td class="py-2 font-mono text-xs">${esc(c.serial)}</td>
+      <td>${esc((CERT_TYPES[c.type]||{}).label||c.type)}</td>
+      <td>${esc(c.student.name)} <span class="text-xs text-gray-500">(${esc(c.student.cls)})</span></td>
+      <td class="text-xs">${certDate(c.issuedOn)}</td>
+      <td class="whitespace-nowrap"><button onclick="viewCertificate('${c.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">👁️ View / Print</button><button onclick="deleteCertificate('${c.id}')" class="text-red-600 text-sm font-bold">🗑️</button></td>
+    </tr>`).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No certificates issued yet.</td></tr>`;
+  const last = LAST_CERT_ID && DB.certificates.find(c=>c.id===LAST_CERT_ID);
+  return `
+  <div class="space-y-5">
+    ${card(`
+      <h2 class="text-xl font-bold text-[var(--navy)] mb-4">📜 Issue a Certificate</h2>
+      <div class="grid md:grid-cols-3 gap-3 mb-4">
+        <div>${lbl('Certificate type')}<select id="certType" onchange="render()" ${inp}>${Object.entries(CERT_TYPES).map(([k,v])=>`<option value="${k}" ${k===type?'selected':''}>${v.icon} ${v.label}</option>`).join('')}</select></div>
+        <div>${lbl('Class')}<select id="certClassSel" onchange="render()" ${inp}>${groups.map(g=>`<option value="${esc(g)}" ${g===grp?'selected':''}>${g==='__alumni'?'🎓 Passed-out students (Alumni)':esc(g)}</option>`).join('')}</select></div>
+        <div>${lbl('Student')}<select id="certStudent" onchange="render()" ${inp}>${people.map(x=>`<option value="${x.id}" ${x.id===pid?'selected':''}>${esc(x.name)} — Roll ${esc(x.roll)}</option>`).join('')||'<option value="">No students</option>'}</select></div>
+      </div>
+      ${p?`<p class="text-xs text-gray-500 mb-3">S/D of <b>${esc(p.father||'—')}</b> · Roll ${esc(p.roll)} · Class ${esc(p.cls)}${p.admissionDate?` · Admitted ${certDate(p.admissionDate)}`:''}</p>`:''}
+      <div class="grid md:grid-cols-2 gap-3">${fields}</div>
+      ${p?`<button onclick="issueCertificate()" class="gold-btn rounded-lg px-5 py-2 font-bold mt-4">📜 Generate Certificate</button>`:'<p class="text-sm text-gray-400">Add students first to issue certificates.</p>'}
+    `)}
+    ${last?`<div id="certPreview">${certPreviewHtml(last)}</div>`:''}
+    ${card(`
+      <h2 class="text-xl font-bold text-[var(--navy)] mb-3">🗂️ Issued Certificates</h2>
+      <p class="text-xs text-gray-500 mb-3">Every certificate has its own serial number and can be re-printed exactly as issued.</p>
+      <div class="overflow-x-auto"><table class="w-full text-sm">
+        <thead><tr class="text-left border-b"><th class="py-2">No.</th><th>Type</th><th>Student</th><th>Issued</th><th>Action</th></tr></thead>
+        <tbody>${logRows}</tbody>
+      </table></div>
+    `)}
+  </div>`;
+}
+function renderParentCertificates(stu){
+  ensureCertData();
+  const mine = DB.certificates.filter(c=>c.studentId===stu.id).reverse();
+  const last = LAST_CERT_ID && mine.find(c=>c.id===LAST_CERT_ID);
+  const rows = mine.map(c=>`<tr class="border-b"><td class="py-2 font-mono text-xs">${esc(c.serial)}</td><td>${esc((CERT_TYPES[c.type]||{}).label||c.type)}</td><td class="text-xs">${certDate(c.issuedOn)}</td><td><button onclick="viewCertificate('${c.id}')" class="text-[var(--navy)] text-sm font-bold">👁️ View / Print</button></td></tr>`).join('')
+    || `<tr><td colspan="4" class="text-center text-gray-400 py-4">No certificates have been issued yet.</td></tr>`;
+  return `<div class="space-y-5">${card(`
+    <h2 class="text-xl font-bold text-[var(--navy)] mb-3">📜 Certificates — ${esc(stu.name)}</h2>
+    <div class="overflow-x-auto"><table class="w-full text-sm">
+      <thead><tr class="text-left border-b"><th class="py-2">No.</th><th>Type</th><th>Issued</th><th>Action</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`)}
+    ${last?`<div id="certPreview">${certPreviewHtml(last)}</div>`:''}
+  </div>`;
+}
+
 function render(){
   if(!SESSION){ renderLogin(); return; }
   if(registryConfigured() && DRIVE_FILE_ID && APPROVAL_STATE.status!=='approved'){
