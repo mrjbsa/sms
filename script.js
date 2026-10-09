@@ -194,8 +194,8 @@ function fetchRegistryJson(){
   const base = `https://www.googleapis.com/drive/v3/files/${id}?alt=media`;
   const tok = (typeof driveAccessToken!=='undefined' && driveAccessToken) ? {Authorization:'Bearer '+driveAccessToken} : null;
   const routes = [
-    ['api-key', ()=>fetch(`${base}&key=${GOOGLE_API_KEY}`)],
     tok && ['sign-in token', ()=>fetch(base,{headers:tok})],
+    ['api-key', ()=>fetch(`${base}&key=${GOOGLE_API_KEY}`)],
     tok && ['token+key', ()=>fetch(`${base}&key=${GOOGLE_API_KEY}`,{headers:tok})],
   ].filter(Boolean);
   const errs=[];
@@ -291,7 +291,7 @@ function gateStatusPanel(){
   const labelCls = bad ? 'text-red-600' : isErr ? 'text-orange-600' : 'text-amber-600';
   const n = APPROVAL_STATE.registryCount;
   const detail = isErr
-    ? `<div class="rounded-lg border border-orange-300 bg-orange-50 p-3 text-xs text-left text-orange-800 mt-2"><b>Could not read the approval registry.</b> This is a connection or setup problem — it is <b>not</b> a decision about your school.<br>Reason: <code class="break-all">${esc(APPROVAL_STATE.detail||'unknown')}</code><br>${driveAccessToken?'':'<button onclick="driveConnect()" class="mt-2 w-full navy-btn rounded-lg py-2 font-bold">🔗 Connect Google Drive and retry</button>'}Please send this message to the admin.</div>`
+    ? `<div class="rounded-lg border border-orange-300 bg-orange-50 p-3 text-xs text-left text-orange-800 mt-2"><b>Status not checked yet.</b> This device could not read the approval registry without signing in — it is <b>not</b> a decision about your school. ${driveAccessToken?'':'Tap the button below to sign in with Google and see your real status.'}<br>Technical detail: <code class="break-all">${esc(APPROVAL_STATE.detail||'unknown')}</code><br>${driveAccessToken?'':'<button onclick="driveConnect()" class="mt-2 w-full navy-btn rounded-lg py-2 font-bold">🔗 Connect Google Drive and retry</button>'}Please send this message to the admin.</div>`
     : st==='pending'
       ? `<p class="text-xs text-gray-600 mt-2 text-left">${APPROVAL_STATE.listed
           ? '✔ Registry reachable — the admin has this School ID on file and is deciding.'
