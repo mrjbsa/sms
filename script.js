@@ -186,19 +186,35 @@ let REQUESTED_PLAN='trial';
 function setRequestedPlan(v){ REQUESTED_PLAN=v; }
 
 function registryConfigured(){ return !!(MASTER_REGISTRY_FILE_ID && !MASTER_REGISTRY_FILE_ID.includes('PASTE')); }
+/* Reads the registry trying every route that can work from a browser, in order, and reports ALL failures.
+   Routes: (1) API key, plain request  (2) the school's own Google sign-in token (no key needed — works even
+   if the API key is restricted)  (3) token + key  (4) key with no-store  (5)(6) Drive download links. */
+function fetchRegistryJson(){
+  const id = MASTER_REGISTRY_FILE_ID;
+  const base = `https://www.googleapis.com/drive/v3/files/${id}?alt=media`;
+  const tok = (typeof driveAccessToken!=='undefined' && driveAccessToken) ? {Authorization:'Bearer '+driveAccessToken} : null;
+  const routes = [
+    ['api-key', ()=>fetch(`${base}&key=${GOOGLE_API_KEY}`)],
+    tok && ['sign-in token', ()=>fetch(base,{headers:tok})],
+    tok && ['token+key', ()=>fetch(`${base}&key=${GOOGLE_API_KEY}`,{headers:tok})],
+    ['api-key no-store', ()=>fetch(`${base}&key=${GOOGLE_API_KEY}`,{cache:'no-store'})],
+    ['drive download', ()=>fetch(`https://drive.usercontent.google.com/download?id=${id}&export=download`)],
+    ['drive uc', ()=>fetch(`https://drive.google.com/uc?export=download&id=${id}`)],
+  ].filter(Boolean);
+  const errs=[];
+  const next=i=>{
+    if(i>=routes.length) return Promise.reject(new Error(errs.join(' | ')));
+    const [name,run]=routes[i];
+    return run().then(r=>{
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return r.text().then(t=>{ const j=JSON.parse(t); if(!j||typeof j!=='object') throw new Error('not JSON'); return j; });
+    }).catch(e=>{ errs.push(name+': '+((e&&e.message)||'failed')); return next(i+1); });
+  };
+  return next(0);
+}
 function refreshApprovalStatus(){
   if(!registryConfigured() || !DRIVE_FILE_ID){ APPROVAL_STATE={status:'approved', entry:null, checkedAt:new Date()}; return Promise.resolve(); }
-  /* cache:'no-store' already bypasses the browser cache — no extra query parameter needed
-     (an unknown parameter can make Google's API reject the request). */
-  /* A plain fetch (no options) is a CORS "simple request" — no preflight. cache:'no-store' adds a
-     Cache-Control header, which forces a preflight that can fail ("Failed to fetch"). Drive already
-     answers with max-age=0, so nothing stale is served. The no-store variant stays as a fallback. */
-  const regUrl = `https://www.googleapis.com/drive/v3/files/${MASTER_REGISTRY_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`;
-  return fetch(regUrl).catch(()=>fetch(regUrl, {cache:'no-store'}))
-    .then(r=>{
-      if(r.ok) return r.json();
-      return r.text().then(t=>{ let m=''; try{ m=((JSON.parse(t).error)||{}).message||''; }catch(e){} throw new Error('HTTP '+r.status+(m?' — '+m:'')); });
-    })
+  return fetchRegistryJson()
     .then(reg=>{
       const schools = (reg && reg.schools) || {};
       const entry = schools[DRIVE_FILE_ID] || null;
@@ -206,7 +222,7 @@ function refreshApprovalStatus(){
     })
     /* FAIL CLOSED but HONEST: access stays blocked, yet the status is "error" (a connection/setup
        problem) — never dressed up as "pending", which would wrongly suggest the admin has not decided. */
-    .catch(e=>{ APPROVAL_STATE={status:'error', entry:null, checkedAt:new Date(), checkFailed:true, detail:(/failed to fetch|networkerror|load failed/i.test((e&&e.message)||'') ? 'Failed to fetch — the admin must open the Platform Admin panel once (it re-shares the registry file publicly), or check the API key restrictions' : ((e&&e.message)||'network error'))}; });
+    .catch(e=>{ APPROVAL_STATE={status:'error', entry:null, checkedAt:new Date(), checkFailed:true, detail:(e&&e.message)||'network error'}; });
 }
 let GATE_SHOWN=false, GATE_CHECKING=false, GATE_MSG='', WELCOME_PENDING=false;
 function checkApprovalStatus(){
