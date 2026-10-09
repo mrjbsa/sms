@@ -188,7 +188,7 @@ function setRequestedPlan(v){ REQUESTED_PLAN=v; }
 function registryConfigured(){ return !!(MASTER_REGISTRY_FILE_ID && !MASTER_REGISTRY_FILE_ID.includes('PASTE')); }
 /* Reads the registry trying every route that can work from a browser, in order, and reports ALL failures.
    Routes: (1) API key, plain request  (2) the school's own Google sign-in token (no key needed — works even
-   if the API key is restricted)  (3) token + key  (4) key with no-store  (5)(6) Drive download links. */
+   if the API key is restricted)  (3) token + key  (no extra fallbacks: more requests only make Google's anti-abuse block worse). */
 function fetchRegistryJson(){
   const id = MASTER_REGISTRY_FILE_ID;
   const base = `https://www.googleapis.com/drive/v3/files/${id}?alt=media`;
@@ -197,9 +197,6 @@ function fetchRegistryJson(){
     ['api-key', ()=>fetch(`${base}&key=${GOOGLE_API_KEY}`)],
     tok && ['sign-in token', ()=>fetch(base,{headers:tok})],
     tok && ['token+key', ()=>fetch(`${base}&key=${GOOGLE_API_KEY}`,{headers:tok})],
-    ['api-key no-store', ()=>fetch(`${base}&key=${GOOGLE_API_KEY}`,{cache:'no-store'})],
-    ['drive download', ()=>fetch(`https://drive.usercontent.google.com/download?id=${id}&export=download`)],
-    ['drive uc', ()=>fetch(`https://drive.google.com/uc?export=download&id=${id}`)],
   ].filter(Boolean);
   const errs=[];
   const next=i=>{
@@ -212,6 +209,7 @@ function fetchRegistryJson(){
   };
   return next(0);
 }
+let APPROVAL_NEXT_AT=0, APPROVAL_FAILS=0;
 function refreshApprovalStatus(){
   if(!registryConfigured() || !DRIVE_FILE_ID){ APPROVAL_STATE={status:'approved', entry:null, checkedAt:new Date()}; return Promise.resolve(); }
   return fetchRegistryJson()
@@ -219,10 +217,11 @@ function refreshApprovalStatus(){
       const schools = (reg && reg.schools) || {};
       const entry = schools[DRIVE_FILE_ID] || null;
       APPROVAL_STATE = {status: effectiveStatus(entry), entry, listed:!!entry, registryCount:Object.keys(schools).length, checkedAt:new Date()};
+      APPROVAL_FAILS=0; APPROVAL_NEXT_AT=Date.now()+30000;
     })
     /* FAIL CLOSED but HONEST: access stays blocked, yet the status is "error" (a connection/setup
        problem) — never dressed up as "pending", which would wrongly suggest the admin has not decided. */
-    .catch(e=>{ APPROVAL_STATE={status:'error', entry:null, checkedAt:new Date(), checkFailed:true, detail:(e&&e.message)||'network error'}; });
+    .catch(e=>{ APPROVAL_FAILS++; APPROVAL_NEXT_AT=Date.now()+Math.min(300000,30000*Math.pow(2,APPROVAL_FAILS-1)); APPROVAL_STATE={status:'error', entry:null, checkedAt:new Date(), checkFailed:true, detail:(e&&e.message)||'network error'}; });
 }
 let GATE_SHOWN=false, GATE_CHECKING=false, GATE_MSG='', WELCOME_PENDING=false;
 function checkApprovalStatus(){
@@ -247,7 +246,7 @@ function openDashboardAfterApproval(){ WELCOME_PENDING=false; render(); }
 /* While the approval screen is up, re-check every 10s on its own (not blocked by a focused
    dropdown like the general 25s sync is), so the moment the admin approves, this updates. */
 setInterval(()=>{
-  if(GATE_SHOWN && !GATE_CHECKING && SESSION){ refreshApprovalStatus().then(()=>render()); }
+  if(GATE_SHOWN && !GATE_CHECKING && SESSION && Date.now()>=APPROVAL_NEXT_AT){ refreshApprovalStatus().then(()=>render()); }
 }, 10000);
 const OWNER_WHATSAPP = ''; // optional: your WhatsApp number with country code, digits only (e.g. 923001234567) — if blank, WhatsApp opens its normal "choose a contact" screen
 function approvalRequestText(schoolName, gmail){
@@ -292,7 +291,7 @@ function gateStatusPanel(){
   const labelCls = bad ? 'text-red-600' : isErr ? 'text-orange-600' : 'text-amber-600';
   const n = APPROVAL_STATE.registryCount;
   const detail = isErr
-    ? `<div class="rounded-lg border border-orange-300 bg-orange-50 p-3 text-xs text-left text-orange-800 mt-2"><b>Could not read the approval registry.</b> This is a connection or setup problem — it is <b>not</b> a decision about your school.<br>Reason: <code class="break-all">${esc(APPROVAL_STATE.detail||'unknown')}</code><br>Please send this message to the admin.</div>`
+    ? `<div class="rounded-lg border border-orange-300 bg-orange-50 p-3 text-xs text-left text-orange-800 mt-2"><b>Could not read the approval registry.</b> This is a connection or setup problem — it is <b>not</b> a decision about your school.<br>Reason: <code class="break-all">${esc(APPROVAL_STATE.detail||'unknown')}</code><br>${driveAccessToken?'':'<button onclick="driveConnect()" class="mt-2 w-full navy-btn rounded-lg py-2 font-bold">🔗 Connect Google Drive and retry</button>'}Please send this message to the admin.</div>`
     : st==='pending'
       ? `<p class="text-xs text-gray-600 mt-2 text-left">${APPROVAL_STATE.listed
           ? '✔ Registry reachable — the admin has this School ID on file and is deciding.'
@@ -302,7 +301,7 @@ function gateStatusPanel(){
     <div class="flex items-start justify-center gap-1 mb-3">${tracker}</div>
     <div class="rounded-lg border p-3 text-left text-sm space-y-1">
       <div>Status: <b class="${labelCls}">${label}</b></div>
-      <div class="text-xs text-gray-500">Last checked: ${APPROVAL_STATE.checkedAt?APPROVAL_STATE.checkedAt.toLocaleTimeString():'—'} · re-checks automatically every 10 seconds</div>
+      <div class="text-xs text-gray-500">Last checked: ${APPROVAL_STATE.checkedAt?APPROVAL_STATE.checkedAt.toLocaleTimeString():'—'} · re-checks automatically</div>
       <div class="text-xs text-gray-500 flex items-center gap-2 flex-wrap">School ID: <code class="bg-gray-100 px-1 rounded break-all">${esc(DRIVE_FILE_ID)}</code>
         <button onclick="copySchoolId()" class="underline text-[var(--navy)]">copy</button></div>
     </div>
