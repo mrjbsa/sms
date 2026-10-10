@@ -6,11 +6,13 @@
     --gold-light:#f7c948;
     --green:#16a34a;
     --paper:#fbfbf9;
+    --bg1:#eef1f8;
+    --bg2:#e4e9f5;
   }
   *{box-sizing:border-box;}
   body{
     font-family:'Georgia','Times New Roman',serif;
-    background:linear-gradient(180deg,#eef1f8 0%,#e4e9f5 100%);
+    background:linear-gradient(180deg,var(--bg1) 0%,var(--bg2) 100%);
     color:#1a1a2e;
   }
   .font-display{font-family:'Georgia','Times New Roman',serif;}

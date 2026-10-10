@@ -56,6 +56,7 @@ function defaultDB(){
       year:'2024-2025',
       timetable:null, // generated array
       headmasterAccount:null, // {name,password,gmail} (gmail is auto-set from the connected Google account) set on first run
+      theme:'royal',
       classFee:{}   // {cls: monthlyAmount} — set by Headmaster in Fees tab
     },
     teachers:[],   // {id,name,subject,cls,password}
@@ -82,7 +83,68 @@ function loadDB(){
     return Object.assign(d, parsed, {config:Object.assign(d.config, parsed.config||{})});
   }catch(e){ return defaultDB(); }
 }
-function saveDB(){ localStorage.setItem(DB_KEY, JSON.stringify(DB)); driveAutoSave(); }
+/* ---- offline-first sync bookkeeping -------------------------------------------------
+   Everything is always saved on THIS device first (works with no internet). Whenever the data
+   differs from what Google Drive last had, a "pending" flag is stored; as soon as the internet is
+   back (and the Headmaster/Teacher is still connected) it uploads automatically. While anything is
+   pending, the app never overwrites local data with the cloud copy, so offline work cannot be lost. */
+function strHash(str){ let h=5381; for(let i=0;i<str.length;i++){ h=((h<<5)+h+str.charCodeAt(i))|0; } return h+':'+str.length; }
+function syncedHash(){ try{ return localStorage.getItem('bfhs_synced_hash'); }catch(e){ return null; } }
+function markSynced(str){ try{ localStorage.setItem('bfhs_synced_hash', strHash(str)); }catch(e){} }
+function setPending(v){ try{ if(v) localStorage.setItem('bfhs_pending_sync','1'); else localStorage.removeItem('bfhs_pending_sync'); }catch(e){} }
+function hasPending(){ try{ return localStorage.getItem('bfhs_pending_sync')==='1'; }catch(e){ return false; } }
+function canWrite(){ return !!(SESSION && (SESSION.role==='headmaster'||SESSION.role==='teacher') && driveLinked()); }
+function saveDB(){
+  const j = JSON.stringify(DB);
+  localStorage.setItem(DB_KEY, j);
+  if(DRIVE_FILE_ID && canWrite()){
+    const base = syncedHash();
+    if(base && strHash(j)!==base){ setPending(true); driveAutoSave(); }
+  }
+  updateSyncBadge();
+}
+
+/* ============================================================
+   THEME COLORS — the Headmaster picks one of 6 palettes in School Setup.
+   Stored in DB.config.theme (so it syncs to Drive and every device shows it).
+   Applied as CSS variables through an injected <style>, so cards, ID cards,
+   certificates, prints and saved images all follow the chosen colors.
+   ============================================================ */
+const THEMES = {
+  royal:   {name:'Royal Navy & Gold',   navy:'#0b1a4a', dark:'#081235', gold:'#f0a500', light:'#f7c948', bg1:'#eef1f8', bg2:'#e4e9f5'},
+  emerald: {name:'Emerald & Gold',      navy:'#065f46', dark:'#022c22', gold:'#d4a017', light:'#f3d36b', bg1:'#eef7f2', bg2:'#e0f0e7'},
+  maroon:  {name:'Maroon & Gold',       navy:'#7f1d1d', dark:'#450a0a', gold:'#e0a526', light:'#f4cf6a', bg1:'#faf0f0', bg2:'#f3e2e2'},
+  purple:  {name:'Royal Purple & Amber',navy:'#4c1d95', dark:'#2e1065', gold:'#f59e0b', light:'#fcd34d', bg1:'#f3effa', bg2:'#e9e2f6'},
+  teal:    {name:'Teal & Orange',       navy:'#0f766e', dark:'#134e4a', gold:'#f97316', light:'#fdba74', bg1:'#edf7f6', bg2:'#dff0ee'},
+  copper:  {name:'Charcoal & Copper',   navy:'#292524', dark:'#1c1917', gold:'#c2793d', light:'#e3a56b', bg1:'#f3f1ef', bg2:'#e8e4e1'}
+};
+function applyTheme(key){
+  const t = THEMES[key] || THEMES.royal;
+  let el = document.getElementById('themeVars');
+  if(!el){ el = document.createElement('style'); el.id='themeVars'; document.head.appendChild(el); }
+  el.textContent = `:root{--navy:${t.navy};--navy-dark:${t.dark};--gold:${t.gold};--gold-light:${t.light};--bg1:${t.bg1};--bg2:${t.bg2};}`;
+  const m = document.querySelector('meta[name="theme-color"]'); if(m) m.setAttribute('content', t.navy);
+}
+function setTheme(key){
+  if(!THEMES[key]) return;
+  DB.config.theme = key; applyTheme(key); saveDB(); render();
+}
+function themePickerHtml(){
+  const cur = DB.config.theme && THEMES[DB.config.theme] ? DB.config.theme : 'royal';
+  return `
+    <h2 class="text-xl font-bold text-[var(--navy)] mb-1">🎨 Theme Colors</h2>
+    <p class="text-sm text-gray-600 mb-4">Choose the colors for your whole school website — headers, buttons, marksheets, ID cards and certificates all follow your choice.</p>
+    <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+      ${Object.entries(THEMES).map(([k,t])=>`
+        <button onclick="setTheme('${k}')" aria-pressed="${k===cur}" class="text-left rounded-xl p-2 border-2 ${k===cur?'border-[var(--gold)] shadow-lg':'border-gray-200'} bg-white">
+          <div style="height:46px;border-radius:10px;overflow:hidden;display:flex;flex-direction:column;">
+            <div style="flex:1;background:${t.navy};"></div><div style="height:9px;background:${t.gold};"></div>
+          </div>
+          <div class="mt-2 text-xs font-bold text-gray-800">${esc(t.name)}${k===cur?' ✓':''}</div>
+        </button>`).join('')}
+    </div>`;
+}
+applyTheme(DB.config.theme);
 
 /* ============================================================
    GOOGLE DRIVE CLOUD SYNC
@@ -210,18 +272,34 @@ function fetchRegistryJson(){
   return next(0);
 }
 let APPROVAL_NEXT_AT=0, APPROVAL_FAILS=0;
+/* An approved school keeps working with no internet: the last confirmed approval is remembered on this device.
+   It is only trusted while the plan has not expired and was confirmed within the last 30 days; a real "denied" or
+   "expired" answer from the registry always wins as soon as it can be read. */
+function approvalCacheGet(){
+  try{
+    const c = JSON.parse(localStorage.getItem('bfhs_approval_cache')||'null');
+    if(!c || c.fid!==DRIVE_FILE_ID || !c.entry) return null;
+    if(Date.now()-c.at > 30*86400000) return null;
+    if(effectiveStatus(c.entry)!=='approved') return null;
+    return c;
+  }catch(e){ return null; }
+}
+function approvalCacheSet(entry){ try{ if(entry && effectiveStatus(entry)==='approved') localStorage.setItem('bfhs_approval_cache', JSON.stringify({fid:DRIVE_FILE_ID, at:Date.now(), entry})); else localStorage.removeItem('bfhs_approval_cache'); }catch(e){} }
 function refreshApprovalStatus(){
   if(!registryConfigured() || !DRIVE_FILE_ID){ APPROVAL_STATE={status:'approved', entry:null, checkedAt:new Date()}; return Promise.resolve(); }
+  const useCache = (why)=>{ const c=approvalCacheGet(); if(!c) return false; APPROVAL_STATE={status:'approved', entry:c.entry, listed:true, checkedAt:new Date(c.at), offlineCached:true, detail:why}; return true; };
+  if(!navigator.onLine && useCache('offline')) return Promise.resolve();
   return fetchRegistryJson()
     .then(reg=>{
       const schools = (reg && reg.schools) || {};
       const entry = schools[DRIVE_FILE_ID] || null;
       APPROVAL_STATE = {status: effectiveStatus(entry), entry, listed:!!entry, registryCount:Object.keys(schools).length, checkedAt:new Date()};
+      approvalCacheSet(entry);
       APPROVAL_FAILS=0; APPROVAL_NEXT_AT=Date.now()+30000;
     })
     /* FAIL CLOSED but HONEST: access stays blocked, yet the status is "error" (a connection/setup
        problem) — never dressed up as "pending", which would wrongly suggest the admin has not decided. */
-    .catch(e=>{ APPROVAL_FAILS++; APPROVAL_NEXT_AT=Date.now()+Math.min(300000,30000*Math.pow(2,APPROVAL_FAILS-1)); APPROVAL_STATE={status:'error', entry:null, checkedAt:new Date(), checkFailed:true, detail:(e&&e.message)||'network error'}; });
+    .catch(e=>{ APPROVAL_FAILS++; APPROVAL_NEXT_AT=Date.now()+Math.min(300000,30000*Math.pow(2,APPROVAL_FAILS-1)); if(useCache((e&&e.message)||'could not reach the registry')) return; APPROVAL_STATE={status:'error', entry:null, checkedAt:new Date(), checkFailed:true, detail:(e&&e.message)||'network error'}; });
 }
 let GATE_SHOWN=false, GATE_CHECKING=false, GATE_MSG='', WELCOME_PENDING=false;
 function checkApprovalStatus(){
@@ -399,6 +477,79 @@ function renderApprovalGate(){
 }
 
 let driveTokenClient=null, driveAccessToken=null, driveConnectedEmail=null, driveLastSync=null, driveAutoTimer=null;
+/* ---- "stay connected until logout" ------------------------------------------------------
+   Google access tokens last about 1 hour. The token + the fact that this person linked Drive are kept
+   on this device; before it expires it is renewed in the background (no pop-up, no Connect screen).
+   If the browser blocks that silent renewal, it is retried on the very next tap/click. Only Logout
+   (or switching Google account) forgets the connection. */
+let driveTokenExp=0, driveRefreshTimer=null, driveWaiters=[], driveRefreshing=false, driveGestureArmed=false, DRIVE_SILENT=false, driveSaving=false;
+function driveLoadAuth(){ try{ return JSON.parse(localStorage.getItem('bfhs_drive_auth')||'null'); }catch(e){ return null; } }
+function driveStoreAuth(){ try{ localStorage.setItem('bfhs_drive_auth', JSON.stringify({linked:true, email:driveConnectedEmail, token:driveAccessToken, exp:driveTokenExp})); }catch(e){} }
+function driveLinked(){ const a=driveLoadAuth(); return !!(a && a.linked); }
+function driveForget(){ try{ localStorage.removeItem('bfhs_drive_auth'); }catch(e){} driveAccessToken=null; driveTokenExp=0; driveConnectedEmail=null; clearTimeout(driveRefreshTimer); }
+(function(){ const a=driveLoadAuth(); if(a && a.linked){ driveConnectedEmail=a.email||null; if(a.token && a.exp && a.exp-60000>Date.now()){ driveAccessToken=a.token; driveTokenExp=a.exp; } } })();
+function driveTokenValid(){ return !!(driveAccessToken && driveTokenExp-60000>Date.now()); }
+function driveFail(e){ driveWaiters.splice(0).forEach(w=>w.reject(e)); driveArmGesture(); }
+function driveArmGesture(){
+  if(driveGestureArmed || !driveLinked()) return;
+  driveGestureArmed = true;
+  const evs=['click','touchend','keydown'];
+  const h=()=>{
+    driveGestureArmed=false; evs.forEach(ev=>document.removeEventListener(ev,h,true));
+    if(!driveTokenValid()) driveEnsureToken().then(()=>driveSyncCycle()).catch(()=>{});
+  };
+  evs.forEach(ev=>document.addEventListener(ev,h,true));
+}
+function driveScheduleRefresh(){
+  clearTimeout(driveRefreshTimer);
+  const wait = Math.max(30000, driveTokenExp-Date.now()-5*60*1000);
+  driveRefreshTimer = setTimeout(()=>{ driveEnsureToken(true).then(()=>driveSyncCycle()).catch(()=>{}); }, wait);
+}
+function driveEnsureToken(force){
+  if(!force && driveTokenValid()) return Promise.resolve();
+  if(!driveLinked()) return Promise.reject(new Error('not connected'));
+  if(!navigator.onLine) return Promise.reject(new Error('offline'));
+  return new Promise((resolve,reject)=>{
+    driveWaiters.push({resolve,reject});
+    if(driveRefreshing) return;
+    driveRefreshing=true; DRIVE_SILENT=true;
+    driveInitTokenClient();
+    if(!driveTokenClient){ driveRefreshing=false; DRIVE_SILENT=false; driveFail(new Error('Google sign-in is not loaded yet')); return; }
+    try{ driveTokenClient.requestAccessToken({prompt:'', hint:driveConnectedEmail||undefined}); }
+    catch(e){ driveRefreshing=false; DRIVE_SILENT=false; driveFail(e); return; }
+    setTimeout(()=>{ if(driveRefreshing){ driveRefreshing=false; DRIVE_SILENT=false; driveFail(new Error('timeout')); } }, 20000);
+  });
+}
+/* Run `fn` once a valid token is available (renewing silently if needed). Offline => stays pending, no error pop-up. */
+function driveWithToken(fn, silent){
+  if(!DRIVE_FILE_ID || (!driveLinked() && !driveAccessToken)){ if(!silent) alert('Connect Google Drive first.'); return Promise.resolve(); }
+  return driveEnsureToken().then(fn).catch(e=>{
+    if(!silent) alert(navigator.onLine ? 'Could not reach Google Drive right now ('+((e&&e.message)||'error')+'). Your changes are safe on this device and will upload automatically.' : 'You are offline. Your changes are saved on this device and will upload to Google Drive automatically when the internet is back.');
+  });
+}
+/* One sync pass: upload if something is pending, otherwise fetch the latest from Drive. */
+function driveSyncCycle(){
+  if(!navigator.onLine || !DRIVE_FILE_ID) { updateSyncBadge(); return Promise.resolve(); }
+  if(hasPending()){ return canWrite() ? driveSaveNow(true) : Promise.resolve(); }
+  if(driveTokenValid()) return drivePullNow(true).then(()=>{ if(SESSION) render(); });
+  return Promise.resolve();
+}
+function updateSyncBadge(){
+  let b = document.getElementById('syncBadge');
+  if(!b){
+    b = document.createElement('div'); b.id='syncBadge'; b.className='no-print';
+    b.style.cssText='position:fixed;left:10px;bottom:10px;z-index:60;font:600 12px "Trebuchet MS",sans-serif;padding:6px 12px;border-radius:999px;color:#fff;box-shadow:0 2px 10px rgba(0,0,0,.25);max-width:92vw;pointer-events:none;';
+    document.body.appendChild(b);
+  }
+  let txt='', bg='var(--navy)';
+  if(!DRIVE_FILE_ID || !SESSION || SESSION.role==='parent'){ b.style.display='none'; return; }
+  if(!navigator.onLine){ txt = hasPending() ? '📴 Offline — changes saved on this device, will upload when internet returns' : '📴 Offline — working from saved data'; bg='#b45309'; }
+  else if(driveSaving){ txt='🔄 Saving to Google Drive…'; }
+  else if(hasPending()){ txt = canWrite() ? '⏳ Uploading your changes…' : '⏳ Changes waiting — connect Google Drive to upload'; bg='#b45309'; }
+  else if(driveLinked()){ txt='☁️ Saved to Google Drive'+(driveLastSync?' · '+driveLastSync.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):''); bg='#166534'; }
+  else { txt='☁️ Google Drive not connected'; bg='#6b7280'; }
+  b.textContent=txt; b.style.background=bg; b.style.display='block';
+}
 function driveConfigured(){ return GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.includes('PASTE') && GOOGLE_API_KEY && !GOOGLE_API_KEY.includes('PASTE'); }
 function driveSetFileId(id){ DRIVE_FILE_ID = id; localStorage.setItem('bfhs_drive_file_id', id); refreshApprovalStatus(); }
 function driveInitTokenClient(){
@@ -407,20 +558,26 @@ function driveInitTokenClient(){
     client_id: GOOGLE_CLIENT_ID,
     scope: 'https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email',
     callback: (resp)=>{
-      if(resp.error){ alert('Google sign-in failed: '+resp.error); return; }
+      const silent = DRIVE_SILENT; DRIVE_SILENT=false; driveRefreshing=false;
+      if(resp.error){ if(silent) driveFail(new Error(resp.error)); else alert('Google sign-in failed: '+resp.error); return; }
       /* Google's consent screen lets the user untick the Drive checkbox. If that happens
          the token has no Drive access and every file call fails with "insufficient
          authentication scopes" — catch it here with a clear instruction instead. */
       if(!google.accounts.oauth2.hasGrantedAllScopes(resp, 'https://www.googleapis.com/auth/drive.file')){
-        alert('Google Drive permission was not granted.\n\nOn the Google screen, please TICK the checkbox that says "See, edit, create and delete only the specific Google Drive files you use with this app", then press Continue.\n\nClick Connect Google Drive and try again.');
-        driveAccessToken = null;
+        if(!silent) alert('Google Drive permission was not granted.\n\nOn the Google screen, please TICK the checkbox that says "See, edit, create and delete only the specific Google Drive files you use with this app", then press Continue.\n\nClick Connect Google Drive and try again.');
+        driveAccessToken = null; driveFail(new Error('Drive permission not granted'));
         return;
       }
       driveAccessToken = resp.access_token;
+      driveTokenExp = Date.now() + (Number(resp.expires_in)||3600)*1000;
+      driveScheduleRefresh();
+      if(silent && driveConnectedEmail){            // background renewal: nothing to ask, nothing to show
+        driveStoreAuth(); driveWaiters.splice(0).forEach(w=>w.resolve()); updateSyncBadge(); return;
+      }
       fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{Authorization:'Bearer '+driveAccessToken}})
         .then(r=>{ if(!r.ok) throw new Error('Could not read your Google account info (status '+r.status+').'); return r.json(); })
         .then(p=>{
-          driveConnectedEmail = p.email;
+          driveConnectedEmail = p.email; driveStoreAuth(); driveWaiters.splice(0).forEach(w=>w.resolve());
           /* Headmaster's backup Gmail = the Google account they just connected (never a teacher's).
              Also scrub any Gmail password stored by older versions — it is never needed. */
           try{
@@ -433,15 +590,17 @@ function driveInitTokenClient(){
           }catch(e){}
           if(!DRIVE_FILE_ID) driveCreateFile(); else refreshApprovalStatus().then(()=>drivePullNow(true)).then(render);
         })
-        .catch(e=>alert('Google Drive sign-in failed: '+e.message));
-    }
+        .catch(e=>{ driveFail(e); if(!silent) alert('Google Drive sign-in failed: '+e.message); });
+    },
+    error_callback: (err)=>{ const silent=DRIVE_SILENT; DRIVE_SILENT=false; driveRefreshing=false; if(silent) driveFail(new Error((err&&err.type)||'sign-in window blocked')); }
   });
 }
 function driveConnect(){
   if(!driveConfigured()){ alert("Google Drive isn't set up yet — add a Google Client ID & API key first (see Cloud Sync instructions)."); return; }
   driveInitTokenClient();
   if(!driveTokenClient){ alert('Still loading Google sign-in — please try again in a moment.'); return; }
-  driveTokenClient.requestAccessToken({prompt:''});
+  DRIVE_SILENT=false; driveRefreshing=true;
+  driveTokenClient.requestAccessToken({prompt:'', hint:driveConnectedEmail||undefined});
 }
 function driveCreateFile(){
   const boundary='bfhs_boundary_xyz';
@@ -454,6 +613,7 @@ function driveCreateFile(){
   }).then(r=>r.json()).then(f=>{
     if(f.id){
       driveSetFileId(f.id);
+      markSynced(JSON.stringify(DB)); setPending(false);
       driveLastSync = new Date();
       refreshApprovalStatus().then(()=>{
         render();
@@ -467,32 +627,52 @@ function driveCreateFile(){
   }).catch(e=>alert('Could not create the Drive file: '+e.message));
 }
 function drivePullNow(silent){
-  if(!driveAccessToken || !DRIVE_FILE_ID){ if(!silent) alert('Connect Google Drive first.'); return Promise.resolve(); }
-  return fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}?alt=media`,{headers:{Authorization:'Bearer '+driveAccessToken}})
-    .then(r=>{ if(!r.ok) throw new Error('load failed ('+r.status+')'); return r.json(); })
-    .then(data=>{ DB = Object.assign(defaultDB(), data, {config:Object.assign(defaultDB().config, data.config||{})}); localStorage.setItem(DB_KEY, JSON.stringify(DB)); driveLastSync=new Date(); if(!silent) render(); })
-    .catch(e=>{ if(!silent) alert('Could not load from Drive: '+e.message); });
+  if(hasPending()){
+    if(silent) return driveSyncCycle();
+    if(!confirm('Some changes made on this device have not reached Google Drive yet.\n\nLoading the latest copy now would REPLACE them. Press Cancel to keep your changes (they upload automatically), or OK to replace them anyway.')) return Promise.resolve();
+    setPending(false);
+  }
+  return driveWithToken(()=>
+    fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}?alt=media`,{headers:{Authorization:'Bearer '+driveAccessToken}})
+    .then(r=>{ if(r.status===401){ driveTokenExp=0; } if(!r.ok) throw new Error('load failed ('+r.status+')'); return r.json(); })
+    .then(data=>{
+      if(hasPending()) return;                      // something was edited while this request was in flight — keep it
+      DB = Object.assign(defaultDB(), data, {config:Object.assign(defaultDB().config, data.config||{})});
+      const j=JSON.stringify(DB); localStorage.setItem(DB_KEY, j); markSynced(j);
+      applyTheme(DB.config.theme); driveLastSync=new Date(); updateSyncBadge(); if(!silent) render();
+    })
+    .catch(e=>{ if(!silent) alert('Could not load from Drive: '+e.message); }), silent);
 }
 function driveSaveNow(silent){
-  if(!driveAccessToken || !DRIVE_FILE_ID){ if(!silent) alert('Connect Google Drive first.'); return Promise.resolve(); }
-  return fetch(`https://www.googleapis.com/upload/drive/v3/files/${DRIVE_FILE_ID}?uploadType=media`,{
-    method:'PATCH',
-    headers:{Authorization:'Bearer '+driveAccessToken, 'Content-Type':'application/json'},
-    body: JSON.stringify(DB)
-  }).then(r=>{ if(!r.ok) throw new Error('save failed ('+r.status+')'); driveLastSync=new Date(); if(!silent) render(); })
-    .catch(e=>{ if(!silent) alert('Could not save to Drive: '+e.message); });
+  if(driveSaving) return Promise.resolve();
+  return driveWithToken(()=>{
+    driveSaving=true; updateSyncBadge();
+    const sent = JSON.stringify(DB);
+    return fetch(`https://www.googleapis.com/upload/drive/v3/files/${DRIVE_FILE_ID}?uploadType=media`,{
+      method:'PATCH',
+      headers:{Authorization:'Bearer '+driveAccessToken, 'Content-Type':'application/json'},
+      body: sent
+    }).then(r=>{
+      if(r.status===401){ driveTokenExp=0; throw new Error('sign-in expired — renewing'); }
+      if(!r.ok) throw new Error('save failed ('+r.status+')');
+      markSynced(sent); driveLastSync=new Date();
+      if(JSON.stringify(DB)===sent) setPending(false); else driveAutoSave();   // edited during upload -> go again
+      if(!silent) render();
+    }).catch(e=>{ if(!silent) alert('Could not save to Drive: '+e.message); setTimeout(()=>driveSyncCycle(), 15000); })
+      .finally(()=>{ driveSaving=false; updateSyncBadge(); });
+  }, silent);
 }
 function driveAutoSave(){
-  if(!driveAccessToken || !DRIVE_FILE_ID) return;
+  if(!DRIVE_FILE_ID || !hasPending()) return;
   clearTimeout(driveAutoTimer);
   driveAutoTimer = setTimeout(()=>driveSaveNow(true), 1500);
 }
 /* Parents read the shared file with just the public API key — no Google sign-in needed */
 function driveParentPull(silent){
-  if(!DRIVE_FILE_ID || !GOOGLE_API_KEY || GOOGLE_API_KEY.includes('PASTE')) return Promise.resolve();
+  if(!DRIVE_FILE_ID || !GOOGLE_API_KEY || GOOGLE_API_KEY.includes('PASTE') || !navigator.onLine || hasPending()) return Promise.resolve();
   return fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`)
     .then(r=>{ if(!r.ok) throw new Error('fetch failed'); return r.json(); })
-    .then(data=>{ DB = Object.assign(defaultDB(), data, {config:Object.assign(defaultDB().config, data.config||{})}); localStorage.setItem(DB_KEY, JSON.stringify(DB)); driveLastSync=new Date(); if(!silent) render(); })
+    .then(data=>{ if(hasPending()) return; DB = Object.assign(defaultDB(), data, {config:Object.assign(defaultDB().config, data.config||{})}); const j=JSON.stringify(DB); localStorage.setItem(DB_KEY, j); if(driveLinked()||syncedHash()) markSynced(j); applyTheme(DB.config.theme); driveLastSync=new Date(); if(!silent) render(); })
     .catch(()=>{});
 }
 function driveMakePublicReadable(){
@@ -517,18 +697,18 @@ function renderCloudSyncPanel(){
       </ol>
     `);
   }
-  const statusLine = driveAccessToken ? `Connected as <b>${esc(driveConnectedEmail||'…')}</b>` : 'Not connected this session';
+  const statusLine = driveLinked() ? `✅ Connected as <b>${esc(driveConnectedEmail||'…')}</b> — stays connected until you log out` : 'Not connected yet';
   return card(`
     <h2 class="text-xl font-bold text-[var(--navy)] mb-4">☁️ Cloud Sync (Google Drive)</h2>
     <p class="text-sm text-gray-600 mb-3">${statusLine}${driveLastSync?` · Last synced ${driveLastSync.toLocaleTimeString()}`:''}</p>
     ${!DRIVE_FILE_ID?'<p class="text-sm text-amber-600 mb-3">No data file yet for this school — click Connect below to create one (do this once, as Headmaster).</p>':''}
     <div class="flex flex-wrap gap-3">
-      <button onclick="driveConnect()" class="navy-btn rounded-lg px-5 py-2 font-bold">🔗 ${driveAccessToken?'Reconnect':'Connect'} Google Drive</button>
+      ${driveLinked()?'':`<button onclick="driveConnect()" class="navy-btn rounded-lg px-5 py-2 font-bold">🔗 Connect Google Drive</button>`}
       <button onclick="driveSaveNow(false)" class="gold-btn rounded-lg px-5 py-2 font-bold">⬆️ Save Now</button>
       <button onclick="drivePullNow(false)" class="bg-gray-200 rounded-lg px-5 py-2 font-bold">⬇️ Load Latest</button>
       ${DRIVE_FILE_ID?`<button onclick="driveMakePublicReadable()" class="bg-purple-600 text-white rounded-lg px-5 py-2 font-bold">👀 Enable Parent Viewing</button>`:''}
     </div>
-    <p class="text-xs text-gray-500 mt-3">Once connected, every change auto-uploads to Google Drive within a couple of seconds, and this device auto-checks for updates roughly every 25 seconds.</p>
+    <p class="text-xs text-gray-500 mt-3">Once connected, every change auto-uploads to Google Drive within a couple of seconds. No internet? Keep working — everything is saved on this device and uploads by itself as soon as the internet is back.</p>
     ${DRIVE_FILE_ID?`
     <div class="mt-5 pt-4 border-t">
       <h3 class="font-bold text-[var(--navy)] mb-1">🔗 Your School Link</h3>
@@ -554,17 +734,33 @@ function renderCloudSyncPanel(){
 setInterval(()=>{
   const tag = document.activeElement && document.activeElement.tagName;
   if(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA') return; // don't disrupt typing
-  refreshApprovalStatus().then(()=>{
-    if(SESSION && SESSION.role==='parent'){ driveParentPull(true).then(()=>{ if(SESSION) render(); }); }
-    else if(driveAccessToken && DRIVE_FILE_ID){ drivePullNow(true).then(()=>{ if(SESSION) render(); }); }
-    else if(SESSION){ render(); } // catches a plan that just expired/got denied, even with nothing else to sync
+  if(!navigator.onLine){ updateSyncBadge(); return; }
+  const doApproval = Date.now()>=APPROVAL_NEXT_AT ? refreshApprovalStatus() : Promise.resolve();
+  doApproval.then(()=>{
+    if(hasPending() && canWrite()){ return driveSyncCycle(); }
+    if(SESSION && SESSION.role==='parent'){ return driveParentPull(true).then(()=>{ if(SESSION) render(); }); }
+    if(DRIVE_FILE_ID && driveLinked() && !hasPending()){ return driveSyncCycle().then(()=>{ if(SESSION) render(); }); }
+    if(SESSION){ render(); } // catches a plan that just expired/got denied, even with nothing else to sync
   });
 }, 25000);
+window.addEventListener('online', ()=>{ updateSyncBadge(); refreshApprovalStatus().then(()=>driveSyncCycle()).then(()=>{ if(SESSION) render(); }); });
+window.addEventListener('offline', updateSyncBadge);
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible' && navigator.onLine) driveSyncCycle(); });
+setInterval(updateSyncBadge, 5000);
 
 /* ---------------------------- SESSION ---------------------------- */
-let SESSION = JSON.parse(sessionStorage.getItem('bfhs_session')||'null');
-function setSession(s){ SESSION=s; sessionStorage.setItem('bfhs_session', JSON.stringify(s)); }
-function logout(){ SESSION=null; GATE_SHOWN=false; WELCOME_PENDING=false; GATE_MSG=''; sessionStorage.removeItem('bfhs_session'); render(); }
+/* The login is remembered on this device (so the Headmaster is not asked again and again) until Logout is pressed. */
+let SESSION = (function(){ try{ return JSON.parse(localStorage.getItem('bfhs_session')||sessionStorage.getItem('bfhs_session')||'null'); }catch(e){ return null; } })();
+function setSession(s){ SESSION=s; try{ localStorage.setItem('bfhs_session', JSON.stringify(s)); }catch(e){} }
+function logout(force){
+  if(force!==true && hasPending() && DRIVE_FILE_ID){
+    if(!confirm('Some changes have not reached Google Drive yet (you may be offline).\n\nIf you log out now, Google Drive is disconnected on this device and those changes upload only after you log in and connect again.\n\nLog out anyway?')) return;
+  }
+  SESSION=null; GATE_SHOWN=false; WELCOME_PENDING=false; GATE_MSG='';
+  try{ localStorage.removeItem('bfhs_session'); sessionStorage.removeItem('bfhs_session'); }catch(e){}
+  driveForget();                                    // logging out is the ONE thing that disconnects Google Drive
+  render(); updateSyncBadge();
+}
 
 /* ---------------------------- HELPERS ---------------------------- */
 function uid(){ return 'id'+Math.random().toString(36).slice(2,10); }
@@ -941,13 +1137,13 @@ async function printEl(id){
       *{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }
       @media print{ .no-print{ display:none !important; } }
       .pre-print-banner{
-        position:fixed; top:0; left:0; right:0; z-index:9; background:#0b1a4a; color:#fff;
+        position:fixed; top:0; left:0; right:0; z-index:9; background:var(--navy); color:#fff;
         font-family:'Trebuchet MS',sans-serif; padding:10px 16px; display:flex;
         align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;
       }
       .pre-print-banner b{ color:#f7c948; }
       .pre-print-banner button{
-        background:#f0a500; color:#081235; font-weight:700; border:none;
+        background:var(--gold); color:var(--navy-dark); font-weight:700; border:none;
         border-radius:8px; padding:8px 18px; cursor:pointer; font-size:14px;
       }
     </style></head><body>
@@ -1228,6 +1424,7 @@ function hmSetup(){
   const csClass = document.getElementById('csClassSel')?.value || c.classes[0];
   return `
   <div class="space-y-5">
+    ${card(themePickerHtml())}
     ${card(`
     <h2 class="text-xl font-bold text-[var(--navy)] mb-4">🏫 School Setup</h2>
     <div class="grid md:grid-cols-2 gap-4">
@@ -1739,6 +1936,7 @@ function studentManagerCard(lockedClass){
         <input id="sFather" placeholder="Father's Name" value="${editing?esc(editing.father):''}" class="border rounded-lg px-3 py-2">
         ${lockedClass ? `<input value="${esc(lockedClass)}" disabled class="border rounded-lg px-3 py-2 bg-gray-100">`
                       : `<select id="sClass" class="border rounded-lg px-3 py-2">${classOpts}</select>`}
+        <select id="sGender" class="border rounded-lg px-3 py-2" title="Gender (used for wording on certificates)"><option value="" ${editing&&editing.gender?'':'selected'}>Gender (optional)</option><option value="M" ${editing&&editing.gender==='M'?'selected':''}>Boy</option><option value="F" ${editing&&editing.gender==='F'?'selected':''}>Girl</option></select>
         <input id="sSection" placeholder="Section (e.g. A)" value="${editing?esc(editing.section):''}" class="border rounded-lg px-3 py-2">
         <input id="sRoll" placeholder="Roll No." value="${editing?esc(editing.roll):''}" class="border rounded-lg px-3 py-2">
         <input id="sMobile" placeholder="Parent Mobile" value="${editing?esc(editing.mobile):''}" class="border rounded-lg px-3 py-2">
@@ -1773,15 +1971,16 @@ function saveStudentForm(lockedClass){
   const roll=document.getElementById('sRoll').value.trim();
   const mobile=document.getElementById('sMobile').value.trim();
   const admissionDate=document.getElementById('sAdmission').value || todayISO();
+  const gender=(document.getElementById('sGender')||{}).value||'';
   const password=document.getElementById('sPassword').value.trim();
   if(!name||!roll){ alert('Please enter at least student name and roll number.'); return; }
   if(EDITING_STUDENT_ID){
     const s = DB.students.find(x=>x.id===EDITING_STUDENT_ID);
-    if(s) Object.assign(s, {name,father,cls,section,roll,mobile,admissionDate, password: password||s.password});
+    if(s) Object.assign(s, {name,father,cls,section,roll,mobile,admissionDate,gender, password: password||s.password});
     EDITING_STUDENT_ID = null;
   } else {
     if(!password){ alert("Please set a parent login password for this student."); return; }
-    DB.students.push({id:uid(), name, father, cls, section, roll, mobile, admissionDate, password});
+    DB.students.push({id:uid(), name, father, cls, section, roll, mobile, admissionDate, gender, password});
   }
   saveDB(); render();
 }
@@ -1979,7 +2178,7 @@ function importData(evt){
   reader.onload = e=>{
     try{
       const parsed = JSON.parse(e.target.result);
-      DB = Object.assign(defaultDB(), parsed, {config:Object.assign(defaultDB().config, parsed.config||{})});
+      DB = Object.assign(defaultDB(), parsed, {config:Object.assign(defaultDB().config, parsed.config||{})}); applyTheme(DB.config.theme);
       saveDB(); alert('Backup restored successfully!'); render();
     }catch(err){ alert('Invalid backup file.'); }
   };
@@ -2258,14 +2457,44 @@ function hmAnnouncements(){
    ============================================================ */
 function currentMonthKey(){ return todayISO().slice(0,7); }
 function feeAmountFor(cls){ return Number((DB.config.classFee||{})[cls]) || 0; }
+/* ---- shared money model (fees AND salaries): one record = {amount, paid, status, paidOn, auto, manual} ----
+   amount = what is billed for the month, paid = what has actually been received (partial payments allowed).
+   Balance = amount - paid. Untouched months (nothing paid, never hand-edited) always follow the CURRENT
+   class fee / teacher salary, so setting a fee after months were auto-created no longer leaves them at Rs. 0. */
+function recAmount(r){ return Math.max(0, Number(r&&r.amount)||0); }
+function recPaid(r){ const a=recAmount(r); const p=(r.paid!=null) ? (Number(r.paid)||0) : (r.status==='Paid'?a:0); return Math.min(Math.max(p,0), a); }
+function recBalance(r){ return recAmount(r)-recPaid(r); }
+function recState(r){ const a=recAmount(r), p=recPaid(r); if(a<=0) return 'NoFee'; if(p>=a) return 'Paid'; if(p>0) return 'Partial'; return 'Unpaid'; }
+function recSync(r){ const st=recState(r); r.paid=recPaid(r); r.status=(st==='Paid')?'Paid':'Unpaid'; if(r.paid>0){ if(!r.paidOn) r.paidOn=todayISO(); } else r.paidOn=null; return r; }
+function recBadge(r){
+  return {Paid:'<span class="ann-badge bg-green-100 text-green-700">✅ Paid</span>',
+          Partial:'<span class="ann-badge bg-amber-100 text-amber-700">◐ Partly paid</span>',
+          Unpaid:'<span class="ann-badge bg-red-100 text-red-700">Unpaid</span>',
+          NoFee:'<span class="ann-badge bg-gray-100 text-gray-600">No amount set</span>'}[recState(r)];
+}
+function rs(n){ return 'Rs. '+(Math.round((Number(n)||0)*100)/100).toLocaleString('en-US'); }
 function ensureFeeRecord(studentId, month, cls){
   if(!DB.fees[studentId]) DB.fees[studentId]={};
-  if(!DB.fees[studentId][month]) DB.fees[studentId][month] = {amount: feeAmountFor(cls), status:'Unpaid', paidOn:null};
-  return DB.fees[studentId][month];
+  let r = DB.fees[studentId][month];
+  const cur = feeAmountFor(cls);
+  if(!r){ r = DB.fees[studentId][month] = {amount:cur, paid:0, status:'Unpaid', paidOn:null, auto:true, cls}; }
+  else if(recPaid(r)===0 && !r.manual && ((r.auto && r.cls===cls) || (recAmount(r)===0 && (!r.cls || r.cls===cls)))){ r.amount=cur; r.auto=true; r.cls=cls; }
+  return r;
 }
-function setClassFee(cls,val){ if(!DB.config.classFee) DB.config.classFee={}; DB.config.classFee[cls]=Number(val)||0; saveDB(); render(); }
-function setFeeAmount(studentId,month,cls,val){ const rec=ensureFeeRecord(studentId,month,cls); rec.amount=Number(val)||0; saveDB(); render(); }
-function setFeeStatus(studentId,month,cls,status){ const rec=ensureFeeRecord(studentId,month,cls); rec.status=status; rec.paidOn = status==='Paid'?todayISO():null; saveDB(); render(); }
+function setClassFee(cls,val){ if(!DB.config.classFee) DB.config.classFee={}; DB.config.classFee[cls]=Math.max(0,Number(val)||0); saveDB(); render(); }
+function setFeeAmount(studentId,month,cls,val){ const r=ensureFeeRecord(studentId,month,cls); r.amount=Math.max(0,Number(val)||0); r.manual=true; recSync(r); saveDB(); render(); }
+function setFeeReceived(studentId,month,cls,val){
+  const r=ensureFeeRecord(studentId,month,cls); const a=recAmount(r);
+  let p=Math.max(0,Number(val)||0);
+  if(p>a){ alert(`Received amount cannot be more than the fee for this month (${rs(a)}).`); p=a; }
+  if(p!==recPaid(r)) r.paidOn = p>0?todayISO():null;
+  r.paid=p; recSync(r); saveDB(); render();
+}
+function setFeeStatus(studentId,month,cls,status){
+  const r=ensureFeeRecord(studentId,month,cls);
+  if(status==='Paid'){ r.paid=recAmount(r); r.paidOn=todayISO(); } else { r.paid=0; r.paidOn=null; }
+  recSync(r); saveDB(); render();
+}
 function monthLabel(month){ return new Date(`${month}-01T00:00:00`).toLocaleString('en',{month:'long',year:'numeric'}); }
 function renderFeeVoucherCard(student, month){
   const cfg = DB.config;
@@ -2290,9 +2519,10 @@ function renderFeeVoucherCard(student, month){
         <div><b>Due Date:</b> ${due}</div>
       </div>
       <div class="ms-summary-box">
-        <div class="row"><span>Tuition Fee</span><span>Rs. ${rec.amount}</span></div>
-        <div class="row"><span>Status</span><span class="${rec.status==='Paid'?'text-green-600':'text-red-600'}">${rec.status}${rec.paidOn?` (${rec.paidOn})`:''}</span></div>
-        <div class="row" style="border-bottom:none;font-size:1rem;"><span>Total Payable</span><span>Rs. ${rec.amount}</span></div>
+        <div class="row"><span>Tuition Fee</span><span>${rs(recAmount(rec))}</span></div>
+        <div class="row"><span>Received</span><span class="text-green-600">${rs(recPaid(rec))}${rec.paidOn&&recPaid(rec)>0?` (${rec.paidOn})`:''}</span></div>
+        <div class="row"><span>Status</span><span class="${recState(rec)==='Paid'?'text-green-600':'text-red-600'}">${{Paid:'Paid in full',Partial:'Partly paid',Unpaid:'Unpaid',NoFee:'No amount set'}[recState(rec)]}</span></div>
+        <div class="row" style="border-bottom:none;font-size:1rem;"><span>Balance Payable</span><span>${rs(recBalance(rec))}</span></div>
       </div>
       <p class="text-xs text-gray-500">Please pay before the due date to avoid a late fee. This voucher is computer-generated and valid without signature.</p>
     </div>
@@ -2362,9 +2592,9 @@ function feeSummary(stu){
   const months = monthsRange(stu.admissionDate || schoolYearStart(), currentMonthKey());
   let totalBilled=0, totalPaid=0; const unpaidMonths=[];
   months.forEach(mo=>{
-    const rec = ensureFeeRecord(stu.id, mo, stu.cls);
-    totalBilled += rec.amount;
-    if(rec.status==='Paid') totalPaid += rec.amount; else unpaidMonths.push(mo);
+    const rec = recSync(ensureFeeRecord(stu.id, mo, stu.cls));
+    totalBilled += recAmount(rec); totalPaid += recPaid(rec);
+    if(recBalance(rec)>0) unpaidMonths.push(mo);
   });
   return {totalBilled, totalPaid, totalDue: totalBilled-totalPaid, unpaidMonths, unpaidCount: unpaidMonths.length};
 }
@@ -2380,20 +2610,20 @@ function hmDashboard(){
   const cm = currentMonthKey();
   let pendingCount=0, pendingAmount=0;
   DB.students.forEach(s=>{
-    const rec = ensureFeeRecord(s.id, cm, s.cls);
-    if(rec.status!=='Paid'){ pendingCount++; pendingAmount+=rec.amount; }
+    const rec = recSync(ensureFeeRecord(s.id, cm, s.cls));
+    if(recBalance(rec)>0){ pendingCount++; pendingAmount+=recBalance(rec); }
   });
   /* Overall (all-time, all students/teachers) running totals — the "perfect calculation" view */
-  let feeTotalPaid=0, feeTotalDue=0, feeOverdueStudents=0;
-  DB.students.forEach(s=>{ const sum=feeSummary(s); feeTotalPaid+=sum.totalPaid; feeTotalDue+=sum.totalDue; if(sum.unpaidCount>=2) feeOverdueStudents++; });
-  let salTotalPaid=0, salTotalDue=0, salOverdueStaff=0;
-  DB.teachers.forEach(t=>{ const sum=salarySummary(t); salTotalPaid+=sum.totalPaid; salTotalDue+=sum.totalDue; if(sum.unpaidCount>=2) salOverdueStaff++; });
+  let feeTotalPaid=0, feeTotalDue=0, feeTotalBilled=0, feeOverdueStudents=0;
+  DB.students.forEach(s=>{ const sum=feeSummary(s); feeTotalBilled+=sum.totalBilled; feeTotalPaid+=sum.totalPaid; feeTotalDue+=sum.totalDue; if(sum.unpaidCount>=2) feeOverdueStudents++; });
+  let salTotalPaid=0, salTotalDue=0, salTotalBilled=0, salOverdueStaff=0;
+  DB.teachers.forEach(t=>{ const sum=salarySummary(t); salTotalBilled+=sum.totalBilled; salTotalPaid+=sum.totalPaid; salTotalDue+=sum.totalDue; if(sum.unpaidCount>=2) salOverdueStaff++; });
   saveDB();
   const upcomingAnn = allAnnouncements('all').filter(a=>a.date>=today).slice(0,4);
   const cls = document.getElementById('dashClassSel')?.value || DB.config.classes[0];
   const top3 = classTopThree(cls);
   const medal = ['🥇','🥈','🥉'];
-  const medalBg = ['#f0a500','#9ca3af','#b45309'];
+  const medalBg = ['var(--gold)','#9ca3af','#b45309'];
 
   return `
   <div class="space-y-5">
@@ -2401,21 +2631,23 @@ function hmDashboard(){
       <div class="doc-frame p-4 text-center"><div class="text-3xl font-bold text-[var(--navy)]">${totalStudents}</div><div class="text-xs text-gray-500 mt-1">🎒 Total Students</div></div>
       <div class="doc-frame p-4 text-center"><div class="text-3xl font-bold text-[var(--navy)]">${totalTeachers}</div><div class="text-xs text-gray-500 mt-1">👩‍🏫 Total Teachers</div></div>
       <div class="doc-frame p-4 text-center"><div class="text-3xl font-bold text-[var(--navy)]">${totalClasses}</div><div class="text-xs text-gray-500 mt-1">🏫 Total Classes</div></div>
-      <div class="doc-frame p-4 text-center"><div class="text-3xl font-bold ${pendingCount?'text-red-600':'text-green-600'}">${pendingCount}</div><div class="text-xs text-gray-500 mt-1">💰 Pending This Month ${pendingCount?`(Rs. ${pendingAmount})`:''}</div></div>
+      <div class="doc-frame p-4 text-center"><div class="text-3xl font-bold ${pendingCount?'text-red-600':'text-green-600'}">${pendingCount}</div><div class="text-xs text-gray-500 mt-1">💰 Pending This Month ${pendingCount?`(${rs(pendingAmount)})`:''}</div></div>
     </div>
     ${card(`
       <h2 class="text-xl font-bold text-[var(--navy)] mb-3">💼 Overall Finances</h2>
       <div class="grid sm:grid-cols-2 gap-4">
         <div class="ms-summary-box p-3">
           <div class="font-bold text-[var(--navy)] mb-2">💰 Student Fees (all-time)</div>
-          <div class="row"><span>Total Collected</span><span class="text-green-600 font-bold">Rs. ${feeTotalPaid}</span></div>
-          <div class="row"><span>Total Due</span><span class="${feeTotalDue>0?'text-red-600':'text-green-600'} font-bold">Rs. ${feeTotalDue}</span></div>
+          <div class="row"><span>Total Fees Billed</span><span class="font-bold">${rs(feeTotalBilled)}</span></div>
+          <div class="row"><span>Total Collected</span><span class="text-green-600 font-bold">${rs(feeTotalPaid)}</span></div>
+          <div class="row"><span>Total Due</span><span class="${feeTotalDue>0?'text-red-600':'text-green-600'} font-bold">${rs(feeTotalDue)}</span></div>
           <div class="row" style="border-bottom:none;"><span>Students 2+ months overdue</span><span class="font-bold ${feeOverdueStudents?'text-red-600':'text-green-600'}">${feeOverdueStudents}</span></div>
         </div>
         <div class="ms-summary-box p-3">
           <div class="font-bold text-[var(--navy)] mb-2">🧾 Staff Salary (all-time)</div>
-          <div class="row"><span>Total Paid</span><span class="text-green-600 font-bold">Rs. ${salTotalPaid}</span></div>
-          <div class="row"><span>Total Due</span><span class="${salTotalDue>0?'text-red-600':'text-green-600'} font-bold">Rs. ${salTotalDue}</span></div>
+          <div class="row"><span>Total Salary Billed</span><span class="font-bold">${rs(salTotalBilled)}</span></div>
+          <div class="row"><span>Total Paid</span><span class="text-green-600 font-bold">${rs(salTotalPaid)}</span></div>
+          <div class="row"><span>Total Due</span><span class="${salTotalDue>0?'text-red-600':'text-green-600'} font-bold">${rs(salTotalDue)}</span></div>
           <div class="row" style="border-bottom:none;"><span>Staff 2+ months overdue</span><span class="font-bold ${salOverdueStaff?'text-red-600':'text-green-600'}">${salOverdueStaff}</span></div>
         </div>
       </div>
@@ -2453,18 +2685,32 @@ function hmDashboard(){
    ============================================================ */
 function ensureSalaryRecord(teacherId, month, defaultAmount){
   if(!DB.salaries[teacherId]) DB.salaries[teacherId]={};
-  if(!DB.salaries[teacherId][month]) DB.salaries[teacherId][month] = {amount: Number(defaultAmount)||0, status:'Unpaid', paidOn:null};
-  return DB.salaries[teacherId][month];
+  let r = DB.salaries[teacherId][month];
+  const cur = Number(defaultAmount)||0;
+  if(!r){ r = DB.salaries[teacherId][month] = {amount:cur, paid:0, status:'Unpaid', paidOn:null, auto:true}; }
+  else if(recPaid(r)===0 && !r.manual && (r.auto || recAmount(r)===0) && cur>0){ r.amount=cur; r.auto=true; }
+  return r;
 }
-function setSalaryAmount(teacherId,month,val){ const rec=ensureSalaryRecord(teacherId,month,0); rec.amount=Number(val)||0; saveDB(); render(); }
-function setSalaryStatus(teacherId,month,status){ const t=DB.teachers.find(x=>x.id===teacherId); const rec=ensureSalaryRecord(teacherId,month,t?t.salary:0); rec.status=status; rec.paidOn = status==='Paid'?todayISO():null; saveDB(); render(); }
+function setSalaryAmount(teacherId,month,val){ const r=ensureSalaryRecord(teacherId,month,0); r.amount=Math.max(0,Number(val)||0); r.manual=true; recSync(r); saveDB(); render(); }
+function setSalaryReceived(teacherId,month,val){
+  const t=DB.teachers.find(x=>x.id===teacherId); const r=ensureSalaryRecord(teacherId,month,t?t.salary:0); const a=recAmount(r);
+  let p=Math.max(0,Number(val)||0);
+  if(p>a){ alert(`Paid amount cannot be more than the salary for this month (${rs(a)}).`); p=a; }
+  if(p!==recPaid(r)) r.paidOn = p>0?todayISO():null;
+  r.paid=p; recSync(r); saveDB(); render();
+}
+function setSalaryStatus(teacherId,month,status){
+  const t=DB.teachers.find(x=>x.id===teacherId); const r=ensureSalaryRecord(teacherId,month,t?t.salary:0);
+  if(status==='Paid'){ r.paid=recAmount(r); r.paidOn=todayISO(); } else { r.paid=0; r.paidOn=null; }
+  recSync(r); saveDB(); render();
+}
 function salarySummary(t){
   const months = monthsRange(t.joinDate || schoolYearStart(), currentMonthKey());
   let totalBilled=0, totalPaid=0; const unpaidMonths=[];
   months.forEach(mo=>{
-    const rec = ensureSalaryRecord(t.id, mo, t.salary);
-    totalBilled += rec.amount;
-    if(rec.status==='Paid') totalPaid += rec.amount; else unpaidMonths.push(mo);
+    const rec = recSync(ensureSalaryRecord(t.id, mo, t.salary));
+    totalBilled += recAmount(rec); totalPaid += recPaid(rec);
+    if(recBalance(rec)>0) unpaidMonths.push(mo);
   });
   return {totalBilled, totalPaid, totalDue: totalBilled-totalPaid, unpaidMonths, unpaidCount: unpaidMonths.length};
 }
@@ -2490,9 +2736,10 @@ function renderSalarySlipCard(t, month){
         <div><b>Due Date:</b> ${due}</div>
       </div>
       <div class="ms-summary-box">
-        <div class="row"><span>Monthly Salary</span><span>Rs. ${rec.amount}</span></div>
-        <div class="row"><span>Status</span><span class="${rec.status==='Paid'?'text-green-600':'text-red-600'}">${rec.status}${rec.paidOn?` (${rec.paidOn})`:''}</span></div>
-        <div class="row" style="border-bottom:none;font-size:1rem;"><span>Total Payable</span><span>Rs. ${rec.amount}</span></div>
+        <div class="row"><span>Monthly Salary</span><span>${rs(recAmount(rec))}</span></div>
+        <div class="row"><span>Paid</span><span class="text-green-600">${rs(recPaid(rec))}${rec.paidOn&&recPaid(rec)>0?` (${rec.paidOn})`:''}</span></div>
+        <div class="row"><span>Status</span><span class="${recState(rec)==='Paid'?'text-green-600':'text-red-600'}">${{Paid:'Paid in full',Partial:'Partly paid',Unpaid:'Unpaid',NoFee:'No amount set'}[recState(rec)]}</span></div>
+        <div class="row" style="border-bottom:none;font-size:1rem;"><span>Balance Payable</span><span>${rs(recBalance(rec))}</span></div>
       </div>
       <p class="text-xs text-gray-500">This slip is computer-generated and valid without signature.</p>
     </div>
@@ -2507,16 +2754,27 @@ function hmSalary(){
   const month = document.getElementById('salMonthSel')?.value || currentMonthKey();
   const t = DB.teachers.find(x=>x.id===tid);
   let collectionBlock = '<p class="text-gray-400 text-sm">No teachers yet.</p>';
+  // payroll for the chosen month across ALL teachers
+  let mBill=0, mPaid=0, mFull=0, mPart=0, mNone=0;
+  DB.teachers.forEach(x=>{ const r=recSync(ensureSalaryRecord(x.id, month, x.salary)); mBill+=recAmount(r); mPaid+=recPaid(r); const st=recState(r); if(st==='Paid') mFull++; else if(st==='Partial') mPart++; else if(st==='Unpaid') mNone++; });
   if(t){
-    const rec = ensureSalaryRecord(t.id, month, t.salary);
+    const rec = recSync(ensureSalaryRecord(t.id, month, t.salary));
     collectionBlock = `
-      <div class="flex flex-wrap gap-3 mb-4 items-center">
-        <select id="salTeacherSel" onchange="render()" class="border rounded-lg px-3 py-2">${DB.teachers.map(x=>`<option value="${x.id}" ${x.id===tid?'selected':''}>${esc(x.name)}</option>`).join('')}</select>
-        <input id="salMonthSel" type="month" value="${month}" onchange="render()" class="border rounded-lg px-3 py-2">
-        <input type="number" value="${rec.amount}" onchange="setSalaryAmount('${t.id}','${month}',this.value)" class="border rounded-lg px-2 py-2 w-28" title="Amount for this month">
-        <button onclick="setSalaryStatus('${t.id}','${month}','Paid')" class="px-3 py-2 rounded-lg text-xs font-bold ${rec.status==='Paid'?'bg-green-600 text-white':'bg-gray-100'}">Paid</button>
-        <button onclick="setSalaryStatus('${t.id}','${month}','Unpaid')" class="px-3 py-2 rounded-lg text-xs font-bold ${rec.status==='Unpaid'?'bg-red-600 text-white':'bg-gray-100'}">Unpaid</button>
+      <div class="flex flex-wrap gap-3 mb-4 items-end">
+        <div><label class="block text-xs font-bold mb-1">Teacher</label><select id="salTeacherSel" onchange="render()" class="border rounded-lg px-3 py-2">${DB.teachers.map(x=>`<option value="${x.id}" ${x.id===tid?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div>
+        <div><label class="block text-xs font-bold mb-1">Month</label><input id="salMonthSel" type="month" value="${month}" onchange="render()" class="border rounded-lg px-3 py-2"></div>
+        <div><label class="block text-xs font-bold mb-1">Salary (Rs.)</label><input type="number" min="0" value="${recAmount(rec)}" onchange="setSalaryAmount('${t.id}','${month}',this.value)" class="border rounded-lg px-2 py-2 w-28" title="Salary for this month"></div>
+        <div><label class="block text-xs font-bold mb-1">Paid so far (Rs.)</label><input type="number" min="0" value="${recPaid(rec)}" onchange="setSalaryReceived('${t.id}','${month}',this.value)" class="border rounded-lg px-2 py-2 w-28" title="Amount already paid this month"></div>
+        <div class="text-sm pb-2">Balance: <b class="${recBalance(rec)>0?'text-red-600':'text-green-600'}">${rs(recBalance(rec))}</b> ${recBadge(rec)}</div>
+        <button onclick="setSalaryStatus('${t.id}','${month}','Paid')" class="px-3 py-2 rounded-lg text-xs font-bold bg-green-600 text-white">Pay in full</button>
+        <button onclick="setSalaryStatus('${t.id}','${month}','Unpaid')" class="px-3 py-2 rounded-lg text-xs font-bold bg-gray-100">Clear</button>
         <button onclick="viewSalarySlip('${t.id}','${month}')" class="text-[var(--navy)] text-sm font-bold">🧾 Slip</button>
+      </div>
+      <div class="grid sm:grid-cols-4 gap-3">
+        <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Payroll — ${monthLabel(month)}</div><div class="text-lg font-bold">${rs(mBill)}</div></div>
+        <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Paid so far</div><div class="text-lg font-bold text-green-600">${rs(mPaid)}</div></div>
+        <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Remaining</div><div class="text-lg font-bold ${mBill-mPaid>0?'text-red-600':'text-green-600'}">${rs(mBill-mPaid)}</div></div>
+        <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Staff</div><div class="text-xs font-bold mt-1">${mFull} paid · ${mPart} partly · ${mNone} unpaid</div></div>
       </div>`;
   }
   const duesRows = DB.teachers.map(x=>{
@@ -2526,21 +2784,22 @@ function hmSalary(){
                 : `<span class="ann-badge bg-green-100 text-green-700">✅ Up to date</span>`;
     return `<tr class="border-b">
       <td class="py-2">${esc(x.name)}</td><td>${esc(x.subject)}</td>
-      <td class="text-green-700 font-bold">Rs. ${sum.totalPaid}</td>
-      <td class="${sum.totalDue>0?'text-red-600':'text-gray-400'} font-bold">Rs. ${sum.totalDue}</td>
+      <td>${rs(sum.totalBilled)}</td>
+      <td class="text-green-700 font-bold">${rs(sum.totalPaid)}</td>
+      <td class="${sum.totalDue>0?'text-red-600':'text-gray-400'} font-bold">${rs(sum.totalDue)}</td>
       <td>${badge}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No teachers yet.</td></tr>`;
+  }).join('') || `<tr><td colspan="6" class="text-center text-gray-400 py-4">No teachers yet.</td></tr>`;
   saveDB();
   return `
   <div class="space-y-5">
-    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-4">🧾 Salary Collection</h2>${collectionBlock}`)}
+    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-4">🧾 Salary Payments</h2>${collectionBlock}`)}
     ${card(`
       <h2 class="text-xl font-bold text-[var(--navy)] mb-4">📋 Salary Dues Summary</h2>
-      <p class="text-xs text-gray-500 mb-3">Running total since each teacher's join date — flags staff who are 2+ months behind.</p>
+      <p class="text-xs text-gray-500 mb-3">Running total since each teacher's join date: Billed = every month's salary, Paid = what has actually been paid, Due = Billed − Paid.</p>
       <div class="overflow-x-auto">
       <table class="w-full text-sm">
-        <thead><tr class="text-left border-b"><th class="py-2">Name</th><th>Subject</th><th>Total Paid</th><th>Total Due</th><th>Status</th></tr></thead>
+        <thead><tr class="text-left border-b"><th class="py-2">Name</th><th>Subject</th><th>Total Billed</th><th>Total Paid</th><th>Total Due</th><th>Status</th></tr></thead>
         <tbody>${duesRows}</tbody>
       </table>
       </div>
@@ -2555,26 +2814,26 @@ function viewSalarySlip(teacherId, month){
 }
 function renderTeacherSalary(t){
   const sum = salarySummary(t);
-  const cm = currentMonthKey();
-  if(!DB.salaries[t.id] || !DB.salaries[t.id][cm]){ ensureSalaryRecord(t.id, cm, t.salary); saveDB(); }
   const months = Object.keys(DB.salaries[t.id]||{}).sort().reverse();
   const rows = months.map(m=>{
-    const rec = DB.salaries[t.id][m];
-    return `<tr class="border-b"><td class="py-2">${monthLabel(m)}</td><td>Rs. ${rec.amount}</td>
-      <td class="font-bold ${rec.status==='Paid'?'text-green-600':'text-red-600'}">${rec.status}</td>
+    const rec = recSync(DB.salaries[t.id][m]);
+    return `<tr class="border-b"><td class="py-2">${monthLabel(m)}</td><td>${rs(recAmount(rec))}</td><td class="text-green-700">${rs(recPaid(rec))}</td><td class="${recBalance(rec)>0?'text-red-600 font-bold':'text-gray-400'}">${rs(recBalance(rec))}</td>
+      <td>${recBadge(rec)}</td>
       <td><button onclick="viewSalarySlip('${t.id}','${m}')" class="text-[var(--navy)] text-sm font-bold">🧾 Slip</button></td></tr>`;
-  }).join('') || `<tr><td colspan="4" class="text-center text-gray-400 py-4">No salary records yet.</td></tr>`;
+  }).join('') || `<tr><td colspan="6" class="text-center text-gray-400 py-4">No salary records yet.</td></tr>`;
+  saveDB();
   return `${card(`
     <h2 class="text-xl font-bold text-[var(--navy)] mb-3">💰 My Salary</h2>
-    <div class="grid sm:grid-cols-3 gap-3 mb-4">
-      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Paid</div><div class="text-xl font-bold text-green-600">Rs. ${sum.totalPaid}</div></div>
-      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Due</div><div class="text-xl font-bold ${sum.totalDue>0?'text-red-600':'text-green-600'}">Rs. ${sum.totalDue}</div></div>
+    <div class="grid sm:grid-cols-4 gap-3 mb-4">
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Salary Billed</div><div class="text-xl font-bold">${rs(sum.totalBilled)}</div></div>
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Paid</div><div class="text-xl font-bold text-green-600">${rs(sum.totalPaid)}</div></div>
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Due</div><div class="text-xl font-bold ${sum.totalDue>0?'text-red-600':'text-green-600'}">${rs(sum.totalDue)}</div></div>
       <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Status</div><div class="text-sm font-bold mt-1">${sum.unpaidCount>=3?`⚠️ ${sum.unpaidCount} months overdue`:sum.unpaidCount>=1?`${sum.unpaidCount} month${sum.unpaidCount>1?'s':''} due`:'✅ Up to date'}</div></div>
     </div>
     <h3 class="font-bold text-[var(--navy)] mb-2">Month-by-Month</h3>
     <div class="overflow-x-auto">
     <table class="w-full text-sm">
-      <thead><tr class="text-left border-b"><th class="py-2">Month</th><th>Amount</th><th>Status</th><th>Slip</th></tr></thead>
+      <thead><tr class="text-left border-b"><th class="py-2">Month</th><th>Salary</th><th>Paid</th><th>Balance</th><th>Status</th><th>Slip</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     </div>
@@ -2585,18 +2844,24 @@ function hmFees(){
   const cls = document.getElementById('feeClassSel')?.value || DB.config.classes[0];
   const month = document.getElementById('feeMonthSel')?.value || currentMonthKey();
   const students = DB.students.filter(s=>s.cls===cls);
+  let tBill=0, tPaid=0, nFull=0, nPart=0, nNone=0;
   const rows = students.map(s=>{
-    const rec = ensureFeeRecord(s.id, month, s.cls);
+    const rec = recSync(ensureFeeRecord(s.id, month, s.cls));
+    tBill+=recAmount(rec); tPaid+=recPaid(rec);
+    const st=recState(rec); if(st==='Paid') nFull++; else if(st==='Partial') nPart++; else if(st==='Unpaid') nNone++;
     return `<tr class="border-b">
       <td class="py-2">${esc(s.roll)}</td><td>${esc(s.name)}</td>
-      <td><input type="number" value="${rec.amount}" onchange="setFeeAmount('${s.id}','${month}','${cls}',this.value)" class="border rounded-lg px-2 py-1 w-24"></td>
+      <td><input type="number" min="0" value="${recAmount(rec)}" onchange="setFeeAmount('${s.id}','${month}','${cls}',this.value)" class="border rounded-lg px-2 py-1 w-24" title="Fee for this month"></td>
+      <td><input type="number" min="0" value="${recPaid(rec)}" onchange="setFeeReceived('${s.id}','${month}','${cls}',this.value)" class="border rounded-lg px-2 py-1 w-24" title="Amount received so far"></td>
+      <td class="${recBalance(rec)>0?'text-red-600 font-bold':'text-gray-400'}">${rs(recBalance(rec))}</td>
+      <td>${recBadge(rec)}</td>
       <td class="whitespace-nowrap">
-        <button onclick="setFeeStatus('${s.id}','${month}','${cls}','Paid')" class="px-3 py-1 rounded-lg text-xs font-bold mr-1 ${rec.status==='Paid'?'bg-green-600 text-white':'bg-gray-100'}">Paid</button>
-        <button onclick="setFeeStatus('${s.id}','${month}','${cls}','Unpaid')" class="px-3 py-1 rounded-lg text-xs font-bold ${rec.status==='Unpaid'?'bg-red-600 text-white':'bg-gray-100'}">Unpaid</button>
+        <button onclick="setFeeStatus('${s.id}','${month}','${cls}','Paid')" class="px-3 py-1 rounded-lg text-xs font-bold mr-1 bg-green-600 text-white">Paid in full</button>
+        <button onclick="setFeeStatus('${s.id}','${month}','${cls}','Unpaid')" class="px-3 py-1 rounded-lg text-xs font-bold bg-gray-100">Clear</button>
       </td>
       <td><button onclick="viewFeeVoucher('${s.id}','${month}')" class="text-[var(--navy)] text-sm font-bold">🧾 Voucher</button></td>
     </tr>`;
-  }).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
+  }).join('') || `<tr><td colspan="8" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
   const duesRows = students.map(s=>{
     const sum = feeSummary(s);
     const badge = sum.unpaidCount>=3 ? `<span class="ann-badge bg-red-100 text-red-700">⚠️ ${sum.unpaidCount} months overdue</span>`
@@ -2604,20 +2869,22 @@ function hmFees(){
                 : `<span class="ann-badge bg-green-100 text-green-700">✅ Up to date</span>`;
     return `<tr class="border-b">
       <td class="py-2">${esc(s.roll)}</td><td>${esc(s.name)}</td>
-      <td class="text-green-700 font-bold">Rs. ${sum.totalPaid}</td>
-      <td class="${sum.totalDue>0?'text-red-600':'text-gray-400'} font-bold">Rs. ${sum.totalDue}</td>
+      <td>${rs(sum.totalBilled)}</td>
+      <td class="text-green-700 font-bold">${rs(sum.totalPaid)}</td>
+      <td class="${sum.totalDue>0?'text-red-600':'text-gray-400'} font-bold">${rs(sum.totalDue)}</td>
       <td>${badge}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
+  }).join('') || `<tr><td colspan="6" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
   saveDB();
   return `
   <div class="space-y-5">
     ${card(`
       <h2 class="text-xl font-bold text-[var(--navy)] mb-4">💰 Monthly Fee — Class Amounts</h2>
+      <p class="text-xs text-gray-500 mb-3">Set the monthly fee once per class. Months that have no payment yet follow this amount automatically; change a single student's amount in the table below if needed.</p>
       <div class="grid sm:grid-cols-3 md:grid-cols-4 gap-3">
         ${DB.config.classes.map(c=>`
         <div><label class="block text-xs font-bold mb-1">Class ${esc(c)}</label>
-          <input type="number" value="${(DB.config.classFee||{})[c] ?? ''}" placeholder="Rs." onchange="setClassFee('${c}',this.value)" class="w-full border rounded-lg px-2 py-1.5 text-sm"></div>`).join('')}
+          <input type="number" min="0" value="${(DB.config.classFee||{})[c] ?? ''}" placeholder="Rs." onchange="setClassFee('${c}',this.value)" class="w-full border rounded-lg px-2 py-1.5 text-sm"></div>`).join('')}
       </div>
     `)}
     ${card(`
@@ -2626,19 +2893,25 @@ function hmFees(){
         <select id="feeClassSel" onchange="render()" class="border rounded-lg px-3 py-2">${DB.config.classes.map(c=>`<option ${c===cls?'selected':''}>${esc(c)}</option>`).join('')}</select>
         <input id="feeMonthSel" type="month" value="${month}" onchange="render()" class="border rounded-lg px-3 py-2">
       </div>
+      <div class="grid sm:grid-cols-4 gap-3 mb-4">
+        <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total fee — Class ${esc(cls)}, ${monthLabel(month)}</div><div class="text-lg font-bold">${rs(tBill)}</div></div>
+        <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Collected so far</div><div class="text-lg font-bold text-green-600">${rs(tPaid)}</div></div>
+        <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Remaining</div><div class="text-lg font-bold ${tBill-tPaid>0?'text-red-600':'text-green-600'}">${rs(tBill-tPaid)}</div></div>
+        <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Students</div><div class="text-xs font-bold mt-1">${nFull} paid · ${nPart} partly · ${nNone} unpaid</div></div>
+      </div>
       <div class="overflow-x-auto">
       <table class="w-full text-sm">
-        <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>Amount</th><th>Status</th><th>Voucher</th></tr></thead>
+        <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>Fee</th><th>Received</th><th>Balance</th><th>Status</th><th>Quick</th><th>Voucher</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
       </div>
     `)}
     ${card(`
       <h2 class="text-xl font-bold text-[var(--navy)] mb-4">📋 Fee Dues Summary — Class ${esc(cls)}</h2>
-      <p class="text-xs text-gray-500 mb-3">Running total since each student's admission date — flags students who are 2+ months behind.</p>
+      <p class="text-xs text-gray-500 mb-3">Running total since each student's admission date: Billed = every month's fee, Paid = what has actually been received, Due = Billed − Paid.</p>
       <div class="overflow-x-auto">
       <table class="w-full text-sm">
-        <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>Total Paid</th><th>Total Due</th><th>Status</th></tr></thead>
+        <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>Total Billed</th><th>Total Paid</th><th>Total Due</th><th>Status</th></tr></thead>
         <tbody>${duesRows}</tbody>
       </table>
       </div>
@@ -2652,27 +2925,27 @@ function viewFeeVoucher(studentId, month){
   box.innerHTML = `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('feeVoucherCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('feeVoucherCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` + renderFeeVoucherCard(stu, month);
 }
 function renderParentFees(stu){
-  const cm = currentMonthKey();
-  if(!DB.fees[stu.id] || !DB.fees[stu.id][cm]){ ensureFeeRecord(stu.id, cm, stu.cls); saveDB(); }
   const sum = feeSummary(stu);
+  saveDB();
   const months = Object.keys(DB.fees[stu.id]||{}).sort().reverse();
   const rows = months.map(m=>{
-    const rec = DB.fees[stu.id][m];
-    return `<tr class="border-b"><td class="py-2">${monthLabel(m)}</td><td>Rs. ${rec.amount}</td>
-      <td class="font-bold ${rec.status==='Paid'?'text-green-600':'text-red-600'}">${rec.status}</td>
+    const rec = recSync(DB.fees[stu.id][m]);
+    return `<tr class="border-b"><td class="py-2">${monthLabel(m)}</td><td>${rs(recAmount(rec))}</td><td class="text-green-700">${rs(recPaid(rec))}</td><td class="${recBalance(rec)>0?'text-red-600 font-bold':'text-gray-400'}">${rs(recBalance(rec))}</td>
+      <td>${recBadge(rec)}</td>
       <td><button onclick="viewFeeVoucher('${stu.id}','${m}')" class="text-[var(--navy)] text-sm font-bold">🧾 Voucher</button></td></tr>`;
-  }).join('') || `<tr><td colspan="4" class="text-center text-gray-400 py-4">No fee records yet.</td></tr>`;
+  }).join('') || `<tr><td colspan="6" class="text-center text-gray-400 py-4">No fee records yet.</td></tr>`;
   return `${card(`
     <h2 class="text-xl font-bold text-[var(--navy)] mb-3">💰 Fee Summary</h2>
-    <div class="grid sm:grid-cols-3 gap-3 mb-4">
-      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Paid</div><div class="text-xl font-bold text-green-600">Rs. ${sum.totalPaid}</div></div>
-      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Due</div><div class="text-xl font-bold ${sum.totalDue>0?'text-red-600':'text-green-600'}">Rs. ${sum.totalDue}</div></div>
+    <div class="grid sm:grid-cols-4 gap-3 mb-4">
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Fees</div><div class="text-xl font-bold">${rs(sum.totalBilled)}</div></div>
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Paid</div><div class="text-xl font-bold text-green-600">${rs(sum.totalPaid)}</div></div>
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Due</div><div class="text-xl font-bold ${sum.totalDue>0?'text-red-600':'text-green-600'}">${rs(sum.totalDue)}</div></div>
       <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Status</div><div class="text-sm font-bold mt-1">${sum.unpaidCount>=3?`⚠️ ${sum.unpaidCount} months overdue`:sum.unpaidCount>=1?`${sum.unpaidCount} month${sum.unpaidCount>1?'s':''} due`:'✅ Up to date'}</div></div>
     </div>
     <h3 class="font-bold text-[var(--navy)] mb-2">Month-by-Month</h3>
     <div class="overflow-x-auto">
     <table class="w-full text-sm">
-      <thead><tr class="text-left border-b"><th class="py-2">Month</th><th>Amount</th><th>Status</th><th>Voucher</th></tr></thead>
+      <thead><tr class="text-left border-b"><th class="py-2">Month</th><th>Fee</th><th>Paid</th><th>Balance</th><th>Status</th><th>Voucher</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     </div>
@@ -2752,28 +3025,28 @@ function renderIdCard(person, role){
   const rows = isStu
     ? [['ID No',idNo],['Father',person.father||'-'],['Roll No',person.roll],['Session',cfg.year]]
     : [['ID No',idNo],['Subject',person.subject],['Class',person.cls],['Session',cfg.year]];
-  const rowsHtml = rows.map(r=>`<div style="display:flex;font-size:6.3pt;line-height:1.6;"><b style="width:12.5mm;flex:none;color:#0b1a4a;">${r[0]}</b><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r[1])}</span></div>`).join('');
+  const rowsHtml = rows.map(r=>`<div style="display:flex;font-size:6.3pt;line-height:1.6;"><b style="width:12.5mm;flex:none;color:var(--navy);">${r[0]}</b><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r[1])}</span></div>`).join('');
   const card = `
   <div id="idCard" data-fname="${esc(person.name)}" style="width:85.6mm;height:54mm;box-sizing:border-box;background:#fbfbf9;border-radius:3mm;overflow:hidden;display:flex;font-family:'Trebuchet MS','Segoe UI',sans-serif;border:0.3mm solid #dcdfe8;color:#1a1a2e;">
-    <div style="width:27mm;flex:none;background:#0b1a4a;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.8mm;border-right:1mm solid #f0a500;">
-      <div style="width:19mm;height:19mm;border-radius:50%;border:0.8mm solid #f0a500;background:#eef1f8;display:flex;align-items:center;justify-content:center;overflow:hidden;">${photo}</div>
-      <div style="background:#f0a500;color:#081235;font-weight:700;font-size:5.5pt;letter-spacing:0.4mm;padding:0.5mm 2.4mm;border-radius:99px;">${role.toUpperCase()}</div>
+    <div style="width:27mm;flex:none;background:var(--navy);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.8mm;border-right:1mm solid var(--gold);">
+      <div style="width:19mm;height:19mm;border-radius:50%;border:0.8mm solid var(--gold);background:#eef1f8;display:flex;align-items:center;justify-content:center;overflow:hidden;">${photo}</div>
+      <div style="background:var(--gold);color:var(--navy-dark);font-weight:700;font-size:5.5pt;letter-spacing:0.4mm;padding:0.5mm 2.4mm;border-radius:99px;">${role.toUpperCase()}</div>
     </div>
     <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
-      <div style="background:#0b1a4a;color:#fff;padding:1.6mm 2.4mm;display:flex;align-items:center;gap:1.6mm;border-bottom:0.7mm solid #f0a500;">
-        <div style="width:7mm;height:7mm;flex:none;border:0.5mm solid #f0a500;border-radius:1.4mm 1.4mm 40% 40%;display:flex;align-items:center;justify-content:center;color:#f7c948;font-size:9pt;overflow:hidden;">${logo}</div>
+      <div style="background:var(--navy);color:#fff;padding:1.6mm 2.4mm;display:flex;align-items:center;gap:1.6mm;border-bottom:0.7mm solid var(--gold);">
+        <div style="width:7mm;height:7mm;flex:none;border:0.5mm solid var(--gold);border-radius:1.4mm 1.4mm 40% 40%;display:flex;align-items:center;justify-content:center;color:var(--gold-light);font-size:9pt;overflow:hidden;">${logo}</div>
         <div style="min-width:0;">
           <div style="font-family:Georgia,serif;font-weight:700;font-size:7pt;line-height:1.15;">${esc(cfg.schoolName)}</div>
-          <div style="color:#f7c948;font-size:4.6pt;letter-spacing:0.35mm;margin-top:0.4mm;">★ IDENTITY CARD ★</div>
+          <div style="color:var(--gold-light);font-size:4.6pt;letter-spacing:0.35mm;margin-top:0.4mm;">★ IDENTITY CARD ★</div>
         </div>
       </div>
       <div style="padding:1.8mm 2.6mm 0;flex:1;min-width:0;">
-        <div style="font-family:Georgia,serif;font-weight:700;color:#0b1a4a;font-size:9.5pt;line-height:1.15;word-break:break-word;">${esc(person.name)}</div>
+        <div style="font-family:Georgia,serif;font-weight:700;color:var(--navy);font-size:9.5pt;line-height:1.15;word-break:break-word;">${esc(person.name)}</div>
         <div style="color:#666;font-size:6pt;margin:0.4mm 0 1.4mm;">${line2}</div>
         ${rowsHtml}
       </div>
-      <div style="background:#0b1a4a;padding:0.9mm 2.6mm;display:flex;justify-content:space-between;font-family:'Brush Script MT',cursive;font-size:7pt;">
-        <span style="color:#fff;">Learn Today</span><span style="color:#f7c948;">Lead Tomorrow</span>
+      <div style="background:var(--navy);padding:0.9mm 2.6mm;display:flex;justify-content:space-between;font-family:'Brush Script MT',cursive;font-size:7pt;">
+        <span style="color:#fff;">Learn Today</span><span style="color:var(--gold-light);">Lead Tomorrow</span>
       </div>
     </div>
   </div>`;
@@ -2899,10 +3172,10 @@ function renderParent(){
    student is promoted or passes out). Headmaster issues; Parents can view/print their own.
    ============================================================ */
 const CERT_TYPES = {
-  pass:         {label:'Pass Certificate',                         title:'CERTIFICATE OF PASS',          icon:'🏅'},
-  leaving:      {label:'School Leaving Certificate',               title:'SCHOOL LEAVING CERTIFICATE',   icon:'📜'},
-  character:    {label:'Character Certificate',                    title:'CHARACTER CERTIFICATE',        icon:'🛡️'},
-  participation:{label:'Participation / Achievement Certificate',  title:'CERTIFICATE OF PARTICIPATION', icon:'🏆'}
+  pass:         {label:'Pass Certificate',                         title:'CERTIFICATE OF PASS',          sub:'OF PASS',          icon:'🏅'},
+  leaving:      {label:'School Leaving Certificate',               title:'SCHOOL LEAVING CERTIFICATE',   sub:'OF SCHOOL LEAVING', icon:'📜'},
+  character:    {label:'Character Certificate',                    title:'CHARACTER CERTIFICATE',        sub:'OF CHARACTER',      icon:'🛡️'},
+  participation:{label:'Participation / Achievement Certificate',  title:'CERTIFICATE OF PARTICIPATION', sub:'OF PARTICIPATION',  icon:'🏆'}
 };
 const EVENT_CATEGORIES = ['Sports / Game','Quiz Competition','Debate','Speech','Art / Drawing','Science Fair','Naat / Qirat','Other'];
 const EVENT_POSITIONS  = ['Participation','1st Position','2nd Position','3rd Position','Winner','Runner-up'];
@@ -2919,58 +3192,66 @@ function certPctFor(p){ return p.finalPct!=null ? Number(p.finalPct) : studentOv
    (feeSummary() would otherwise keep inventing new unpaid months after they left). */
 function certDues(p){
   if(p.passedOutOn){
-    return Object.values(DB.fees[p.id]||{}).reduce((t,r)=>t+(r.status!=='Paid'?(Number(r.amount)||0):0),0);
+    return Object.values(DB.fees[p.id]||{}).reduce((t,r)=>t+recBalance(r),0);
   }
   return feeSummary(p).totalDue;
 }
 
 function renderCertificateCard(rec){
   const cfg=DB.config, st=rec.student, d=rec.data||{}, T=CERT_TYPES[rec.type]||CERT_TYPES.pass;
-  const who = `<b>${esc(st.name)}</b>, S/D of <b>${esc(st.father||'—')}</b>, Roll No. <b>${esc(st.roll)}</b>`;
-  let body='';
+  const g = st.gender, hisHer = g==='M'?'his':g==='F'?'her':'his/her', heShe = g==='M'?'he':g==='F'?'she':'he/she', himHer = g==='M'?'him':g==='F'?'her':'him/her', sonOf = g==='M'?'Son of':g==='F'?'Daughter of':'Son/Daughter of';
+  const initials = (cfg.schoolName||'S').split(/\s+/).filter(w=>/^[A-Za-z]/.test(w)).slice(0,3).map(w=>w[0].toUpperCase()).join('') || 'S';
+  let pre='This is to certify that', body='';
   if(rec.type==='pass'){
-    body = `This is to certify that ${who}, a student of <b>Class ${esc(st.cls)}</b> of this school, has <b>PASSED</b> the <b>${esc(d.exam||'Annual Examination')}</b> held in session <b>${esc(d.session||cfg.year)}</b>${d.pct!=null?`, securing <b>${Number(d.pct).toFixed(2)}%</b> marks (Grade <b>${esc(d.grade||'')}</b>)`:''}. We wish him/her every success in the future.`;
+    body = `has <b>successfully passed</b> the <b>${esc(d.exam||'Annual Examination')}</b> held in the academic session <b>${esc(d.session||cfg.year)}</b> as a regular student of <b>Class ${esc(st.cls)}</b>${d.pct!=null?`, securing <b>${Number(d.pct).toFixed(2)}%</b> marks and <b>Grade ${esc(d.grade||'')}</b>`:''}. ${hisHer[0].toUpperCase()+hisHer.slice(1)} performance has been commendable. We wish ${himHer} continued success in all future endeavours.`;
   } else if(rec.type==='leaving'){
-    body = `This is to certify that ${who}, was a bonafide student of this school${st.admissionDate?` from <b>${certDate(st.admissionDate)}</b>`:''} to <b>${certDate(d.leaveDate)}</b>. The last class studied was <b>Class ${esc(d.lastClass||st.cls)}</b>. The reason for leaving is stated as <b>${esc(d.reason)}</b>, and his/her conduct during the stay was <b>${esc(d.conduct)}</b>. School dues: <b>${d.duesCleared?'cleared in full':`Rs. ${esc(d.duesAmount)} outstanding at the time of issue`}</b>. This certificate is issued on request.`;
+    body = `was a <b>bonafide student</b> of this institution${st.admissionDate?` from <b>${certDate(st.admissionDate)}</b>`:''} to <b>${certDate(d.leaveDate)}</b> and last studied in <b>Class ${esc(d.lastClass||st.cls)}</b>. The reason for leaving is stated as <b>${esc(d.reason)}</b>, and ${hisHer} conduct during the period of study was found to be <b>${esc(d.conduct)}</b>. School dues are <b>${d.duesCleared?'cleared in full':`outstanding to the extent of Rs. ${esc(d.duesAmount)}`}</b>. This certificate is issued on the request of the parent/guardian.`;
   } else if(rec.type==='character'){
-    body = `This is to certify that ${who}, is a student of <b>Class ${esc(st.cls)}</b> of this school${st.admissionDate?` since <b>${certDate(st.admissionDate)}</b>`:''}. During this period his/her character and conduct have been <b>${esc(d.conduct)}</b>, and to the best of our knowledge he/she bears a good moral character.${d.purpose?` This certificate is issued ${esc(d.purpose)}.`:''}`;
+    body = `is a regular student of <b>Class ${esc(st.cls)}</b> of this institution${st.admissionDate?` since <b>${certDate(st.admissionDate)}</b>`:''}. During this period ${hisHer} character and conduct have been <b>${esc(d.conduct)}</b>. To the best of our knowledge, ${heShe} bears a good moral character and has not been involved in any activity prejudicial to the discipline of the school.${d.purpose?` This certificate is issued ${esc(d.purpose)}.`:''}`;
   } else {
     const pos = d.position||'Participation';
     const phrase = pos==='Participation' ? 'in recognition of active participation in'
                  : pos==='Winner' ? 'in recognition of winning'
                  : pos==='Runner-up' ? 'in recognition of being the Runner-up in'
                  : `in recognition of securing the <b>${esc(pos)}</b> in`;
-    body = `This certificate is proudly presented to <b>${esc(st.name)}</b>, S/D of <b>${esc(st.father||'—')}</b>, of <b>Class ${esc(st.cls)}</b>, ${phrase} the <b>${esc(d.event)}</b> (${esc(d.category)}) held on <b>${certDate(d.eventDate)}</b>${d.organizer?`, organized by <b>${esc(d.organizer)}</b>`:''}. We appreciate the effort and wish continued success.`;
+    pre='This certificate is proudly presented to';
+    body = `of <b>Class ${esc(st.cls)}</b>, ${phrase} the <b>${esc(d.event)}</b> (${esc(d.category)}) held on <b>${certDate(d.eventDate)}</b>${d.organizer?`, organized by <b>${esc(d.organizer)}</b>`:''}. We appreciate the dedication shown and wish continued success.`;
   }
   const hmName = cfg.headmasterAccount && cfg.headmasterAccount.name || '';
+  const corner = (pos)=>`<div style="position:absolute;${pos};width:34px;height:34px;border:3px solid var(--gold);${pos.includes('top')?'border-bottom:none;':'border-top:none;'}${pos.includes('left')?'border-right:none;':'border-left:none;'}"></div>`;
   return `
-  <div class="doc-frame max-w-2xl mx-auto" id="certificateCard" data-fname="${esc(st.name)}" style="min-height:960px;display:flex;flex-direction:column;">
-    <div class="doc-topbar"></div>
-    <div class="doc-arc">
-      <div class="doc-shield">${cfg.logo?`<img src="${cfg.logo}" class="w-full h-full object-cover rounded-lg">`:'🎓'}</div>
-      <div class="doc-title">${esc(cfg.schoolName.split(' ').slice(0,2).join(' '))}</div>
-      <div class="doc-subtitle">${esc(cfg.schoolName.split(' ').slice(2).join(' '))}</div>
-      <div class="doc-badge">★ CERTIFICATE ★</div>
-    </div>
-    <div style="flex:1;margin:18px 22px;border:4px double #f0a500;border-radius:16px;padding:26px 30px;display:flex;flex-direction:column;justify-content:space-between;background:#fffdf7;">
+  <div class="doc-frame max-w-2xl mx-auto" id="certificateCard" data-fname="${esc(st.name)}" style="min-height:990px;display:flex;flex-direction:column;background:var(--navy);padding:14px;border-radius:10px;">
+    <div style="flex:1;position:relative;background:#fffdf8;border:2px solid var(--gold);padding:30px 40px 22px;display:flex;flex-direction:column;justify-content:space-between;background-image:radial-gradient(circle at 50% 0%, rgba(240,165,0,.10), transparent 55%);">
+      ${corner('top:8px;left:8px')}${corner('top:8px;right:8px')}${corner('bottom:8px;left:8px')}${corner('bottom:8px;right:8px')}
       <div style="text-align:center;">
-        <div style="font-size:2.2rem;">${T.icon}</div>
-        <div style="font-family:Georgia,serif;color:#0b1a4a;font-size:1.5rem;font-weight:700;letter-spacing:2px;margin-top:4px;">${T.title}</div>
-        <div style="width:90px;height:3px;background:#f0a500;margin:10px auto 18px;border-radius:2px;"></div>
+        <div style="width:70px;height:70px;margin:0 auto 8px;border:3px solid var(--gold);border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;overflow:hidden;color:var(--gold-light);font-size:28px;">${cfg.logo?`<img src="${cfg.logo}" style="width:100%;height:100%;object-fit:cover;">`:'🎓'}</div>
+        <div style="font-family:Georgia,serif;color:var(--navy);font-size:1.45rem;font-weight:700;letter-spacing:3px;text-transform:uppercase;">${esc(cfg.schoolName)}</div>
+        <div style="font-family:'Trebuchet MS',sans-serif;color:var(--gold);font-size:.72rem;letter-spacing:4px;margin-top:3px;font-weight:700;">LEARN TODAY · LEAD TOMORROW</div>
       </div>
-      <p style="font-family:Georgia,serif;font-size:1.05rem;line-height:1.9;text-align:justify;color:#1a1a2e;margin:0;">${body}</p>
+      <div style="text-align:center;margin-top:10px;">
+        <div style="font-family:Georgia,serif;color:var(--navy);font-size:2.7rem;font-weight:700;letter-spacing:8px;line-height:1.1;">CERTIFICATE</div>
+        <div style="font-family:'Trebuchet MS',sans-serif;color:var(--gold);font-size:.95rem;font-weight:700;letter-spacing:5px;margin-top:4px;">${esc(T.sub)}</div>
+        <div style="display:flex;align-items:center;justify-content:center;gap:10px;margin:12px 0 4px;"><span style="width:90px;height:2px;background:var(--gold);"></span><span style="color:var(--gold);font-size:1.1rem;">${T.icon}</span><span style="width:90px;height:2px;background:var(--gold);"></span></div>
+      </div>
+      <div style="text-align:center;">
+        <div style="font-family:Georgia,serif;font-style:italic;font-size:1.05rem;color:#555;">${pre}</div>
+        <div style="font-family:Georgia,serif;font-style:italic;font-weight:700;font-size:2.1rem;color:var(--navy);margin:8px 0 2px;line-height:1.2;word-break:break-word;">${esc(st.name)}</div>
+        <div style="width:62%;height:2px;background:var(--gold);margin:0 auto 6px;"></div>
+        <div style="font-family:'Trebuchet MS',sans-serif;font-size:.85rem;color:#444;">${sonOf} <b>${esc(st.father||'—')}</b> &nbsp;•&nbsp; Roll No. <b>${esc(st.roll)}</b> &nbsp;•&nbsp; Class <b>${esc(st.cls)}</b></div>
+      </div>
+      <p style="font-family:Georgia,serif;font-size:1.08rem;line-height:1.95;text-align:center;color:#1a1a2e;margin:6px 0 0;">${body}</p>
       <div>
-        <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:34px;text-align:center;font-family:'Trebuchet MS',sans-serif;font-size:.8rem;">
-          <div style="width:30%;"><div style="border-top:1.5px solid #0b1a4a;padding-top:4px;font-weight:700;">Class Teacher</div></div>
-          <div style="width:70px;height:70px;border:3px double #f0a500;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#0b1a4a;font-size:.6rem;font-weight:700;line-height:1.2;">SCHOOL<br>SEAL</div>
-          <div style="width:30%;"><div style="border-top:1.5px solid #0b1a4a;padding-top:4px;font-weight:700;">Principal / Headmaster</div>${hmName?`<div style="color:#666;font-size:.7rem;">${esc(hmName)}</div>`:''}</div>
+        <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:30px;text-align:center;font-family:'Trebuchet MS',sans-serif;font-size:.8rem;">
+          <div style="width:28%;"><div style="height:28px;"></div><div style="border-top:1.5px solid var(--navy);padding-top:4px;font-weight:700;color:var(--navy);">Class Teacher</div></div>
+          <div style="width:92px;height:92px;border:3px double var(--gold);border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--navy);background:radial-gradient(circle,#fff 52%, rgba(240,165,0,.18));box-shadow:0 0 0 4px #fffdf8,0 0 0 5px var(--gold);">
+            <div style="color:var(--gold);font-size:.8rem;line-height:1;">★ ★ ★</div>
+            <div style="font-family:Georgia,serif;font-weight:700;font-size:1.25rem;letter-spacing:1px;line-height:1.1;">${esc(initials)}</div>
+            <div style="font-size:.42rem;letter-spacing:1px;font-weight:700;">OFFICIAL SEAL</div>
+          </div>
+          <div style="width:28%;"><div style="height:28px;"></div><div style="border-top:1.5px solid var(--navy);padding-top:4px;font-weight:700;color:var(--navy);">Principal / Headmaster</div>${hmName?`<div style="color:#666;font-size:.7rem;">${esc(hmName)}</div>`:''}</div>
         </div>
-        <div style="display:flex;justify-content:space-between;margin-top:16px;font-family:'Trebuchet MS',sans-serif;font-size:.75rem;color:#555;"><span>Certificate No: <b>${esc(rec.serial)}</b></span><span>Date of Issue: <b>${certDate(rec.issuedOn)}</b></span></div>
+        <div style="display:flex;justify-content:space-between;margin-top:18px;padding-top:8px;border-top:1px solid #e6dcc0;font-family:'Trebuchet MS',sans-serif;font-size:.74rem;color:#555;"><span>Certificate No: <b>${esc(rec.serial)}</b></span><span>Date of Issue: <b>${certDate(rec.issuedOn)}</b></span></div>
       </div>
-    </div>
-    <div class="doc-footer">
-      <span class="lead">Learn Today</span>
-      <span class="lead2">Lead Tomorrow</span>
     </div>
   </div>`;
 }
@@ -3137,4 +3418,21 @@ function render(){
   else if(SESSION.role==='parent') renderParent();
   else { logout(); }
 }
-Promise.all([driveParentPull(true), refreshApprovalStatus()]).then(render); // grab the latest shared data + approval status (if Cloud Sync is set up) before first paint
+/* First paint: try to grab the latest shared data + approval status, but never make the school wait more than 4s
+   (slow / no internet) — the saved copy on this device is shown instead. */
+Promise.race([Promise.all([driveParentPull(true), refreshApprovalStatus()]), new Promise(r=>setTimeout(r,4000))]).then(()=>{ render(); updateSyncBadge(); });
+/* Reconnect to Google Drive in the background for a person who linked it earlier (no Connect screen). */
+(function driveBoot(){
+  let tries=0;
+  const go=()=>{
+    if(!driveLinked() || !DRIVE_FILE_ID) return;
+    if(!window.google || !google.accounts){ if(++tries<40) setTimeout(go,500); else driveArmGesture(); return; }
+    if(driveTokenValid()){ driveScheduleRefresh(); driveSyncCycle(); return; }
+    driveEnsureToken().then(()=>driveSyncCycle()).then(()=>{ if(SESSION) render(); }).catch(()=>{});
+  };
+  go();
+})();
+/* Offline app: register the service worker (needs https or localhost). */
+if('serviceWorker' in navigator && /^https?:$/.test(location.protocol)){
+  window.addEventListener('load', ()=>{ navigator.serviceWorker.register('sw.js').catch(()=>{}); });
+}
