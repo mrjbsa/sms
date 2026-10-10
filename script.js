@@ -559,7 +559,7 @@ function updateSyncBadge(){
   let b = document.getElementById('syncBadge');
   if(!b){
     b = document.createElement('div'); b.id='syncBadge'; b.className='no-print';
-    b.style.cssText='position:fixed;left:10px;bottom:10px;z-index:60;font:600 12px "Trebuchet MS",sans-serif;padding:6px 12px;border-radius:999px;color:#fff;box-shadow:0 2px 10px rgba(0,0,0,.25);max-width:92vw;pointer-events:none;';
+    b.style.cssText='position:fixed;right:10px;bottom:10px;z-index:60;font:600 12px "Trebuchet MS",sans-serif;padding:6px 12px;border-radius:999px;color:#fff;box-shadow:0 2px 10px rgba(0,0,0,.25);max-width:92vw;pointer-events:none;';
     document.body.appendChild(b);
   }
   let txt='', bg='var(--navy)';
@@ -2735,6 +2735,10 @@ function hmDashboard(){
    instead of admissionDate). Due date is also 1st–10th of the
    FOLLOWING month, matching how the fee vouchers work.
    ============================================================ */
+/* A teacher is paid only from the month they joined — earlier months never count (same rule as student fees). */
+function salStartMonth(t){ return (t.joinDate || schoolYearStart()).slice(0,7); }
+function salApplies(t, month){ return month >= salStartMonth(t); }
+function salGuard(teacherId, month){ const t=DB.teachers.find(x=>x.id===teacherId); if(t && !salApplies(t,month)){ alert(`${t.name} joined in ${monthLabel(salStartMonth(t))}, so no salary applies for ${monthLabel(month)}.`); render(); return false; } return true; }
 function ensureSalaryRecord(teacherId, month, defaultAmount){
   if(!DB.salaries[teacherId]) DB.salaries[teacherId]={};
   let r = DB.salaries[teacherId][month];
@@ -2743,8 +2747,9 @@ function ensureSalaryRecord(teacherId, month, defaultAmount){
   else if(recPaid(r)===0 && !r.manual && (r.auto || recAmount(r)===0) && cur>0){ r.amount=cur; r.auto=true; }
   return r;
 }
-function setSalaryAmount(teacherId,month,val){ const r=ensureSalaryRecord(teacherId,month,0); r.amount=Math.max(0,Number(val)||0); r.manual=true; recSync(r); saveDB(); render(); }
+function setSalaryAmount(teacherId,month,val){ if(!salGuard(teacherId,month)) return; const r=ensureSalaryRecord(teacherId,month,0); r.amount=Math.max(0,Number(val)||0); r.manual=true; recSync(r); saveDB(); render(); }
 function setSalaryReceived(teacherId,month,val){
+  if(!salGuard(teacherId,month)) return;
   const t=DB.teachers.find(x=>x.id===teacherId); const r=ensureSalaryRecord(teacherId,month,t?t.salary:0); const a=recAmount(r);
   let p=Math.max(0,Number(val)||0);
   if(p>a){ alert(`Paid amount cannot be more than the salary for this month (${rs(a)}).`); p=a; }
@@ -2752,6 +2757,7 @@ function setSalaryReceived(teacherId,month,val){
   r.paid=p; recSync(r); saveDB(); render();
 }
 function setSalaryStatus(teacherId,month,status){
+  if(!salGuard(teacherId,month)) return;
   const t=DB.teachers.find(x=>x.id===teacherId); const r=ensureSalaryRecord(teacherId,month,t?t.salary:0);
   if(status==='Paid'){ r.paid=recAmount(r); r.paidOn=todayISO(); } else { r.paid=0; r.paidOn=null; }
   recSync(r); saveDB(); render();
@@ -2807,20 +2813,23 @@ function hmSalary(){
   const t = DB.teachers.find(x=>x.id===tid);
   let collectionBlock = '<p class="text-gray-400 text-sm">No teachers yet.</p>';
   // payroll for the chosen month across ALL teachers
-  let mBill=0, mPaid=0, mFull=0, mPart=0, mNone=0;
-  DB.teachers.forEach(x=>{ const r=recSync(ensureSalaryRecord(x.id, month, x.salary)); mBill+=recAmount(r); mPaid+=recPaid(r); const st=recState(r); if(st==='Paid') mFull++; else if(st==='Partial') mPart++; else if(st==='Unpaid') mNone++; });
+  let mBill=0, mPaid=0, mFull=0, mPart=0, mNone=0, notYetJoined=0;
+  DB.teachers.forEach(x=>{ if(!salApplies(x, month)){ notYetJoined++; return; } const r=recSync(ensureSalaryRecord(x.id, month, x.salary)); mBill+=recAmount(r); mPaid+=recPaid(r); const st=recState(r); if(st==='Paid') mFull++; else if(st==='Partial') mPart++; else if(st==='Unpaid') mNone++; });
   if(t){
-    const rec = recSync(ensureSalaryRecord(t.id, month, t.salary));
-    collectionBlock = `
+    const tApplies = salApplies(t, month);
+    const rec = tApplies ? recSync(ensureSalaryRecord(t.id, month, t.salary)) : {amount:0,paid:0};
+    const joinNote = !tApplies ? `<div class="w-full text-sm bg-amber-50 border border-amber-300 text-amber-800 rounded-lg px-3 py-2">⚠️ <b>${esc(t.name)}</b> joined in <b>${monthLabel(salStartMonth(t))}</b>, so there is no salary for ${monthLabel(month)} — pick ${monthLabel(salStartMonth(t))} or a later month.</div>` : '';
+    const othersNote = notYetJoined ? `<p class="text-xs text-amber-700 mb-3">ℹ️ ${notYetJoined} teacher${notYetJoined>1?'s':''} joined after ${monthLabel(month)}, so ${notYetJoined>1?'they are':"they're"} not included in this month's payroll.</p>` : '';
+    collectionBlock = othersNote + `
       <div class="flex flex-wrap gap-3 mb-4 items-end">
         <div><label class="block text-xs font-bold mb-1">Teacher</label><select id="salTeacherSel" onchange="render()" class="border rounded-lg px-3 py-2">${DB.teachers.map(x=>`<option value="${x.id}" ${x.id===tid?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div>
         <div><label class="block text-xs font-bold mb-1">Month</label><input id="salMonthSel" type="month" value="${month}" onchange="render()" class="border rounded-lg px-3 py-2"></div>
-        <div><label class="block text-xs font-bold mb-1">Salary (Rs.)</label><input type="number" min="0" value="${recAmount(rec)}" onchange="setSalaryAmount('${t.id}','${month}',this.value)" class="border rounded-lg px-2 py-2 w-28" title="Salary for this month"></div>
+        ${tApplies?`<div><label class="block text-xs font-bold mb-1">Salary (Rs.)</label><input type="number" min="0" value="${recAmount(rec)}" onchange="setSalaryAmount('${t.id}','${month}',this.value)" class="border rounded-lg px-2 py-2 w-28" title="Salary for this month"></div>
         <div><label class="block text-xs font-bold mb-1">Paid so far (Rs.)</label><input type="number" min="0" value="${recPaid(rec)}" onchange="setSalaryReceived('${t.id}','${month}',this.value)" class="border rounded-lg px-2 py-2 w-28" title="Amount already paid this month"></div>
         <div class="text-sm pb-2">Balance: <b class="${recBalance(rec)>0?'text-red-600':'text-green-600'}">${rs(recBalance(rec))}</b> ${recBadge(rec)}</div>
         <button onclick="setSalaryStatus('${t.id}','${month}','Paid')" class="px-3 py-2 rounded-lg text-xs font-bold bg-green-600 text-white">Pay in full</button>
         <button onclick="setSalaryStatus('${t.id}','${month}','Unpaid')" class="px-3 py-2 rounded-lg text-xs font-bold bg-gray-100">Clear</button>
-        <button onclick="viewSalarySlip('${t.id}','${month}')" class="text-[var(--navy)] text-sm font-bold">🧾 Slip</button>
+        <button onclick="viewSalarySlip('${t.id}','${month}')" class="text-[var(--navy)] text-sm font-bold">🧾 Slip</button>`:joinNote}
       </div>
       <div class="grid sm:grid-cols-4 gap-3">
         <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Payroll — ${monthLabel(month)}</div><div class="text-lg font-bold">${rs(mBill)}</div></div>
@@ -2851,7 +2860,7 @@ function hmSalary(){
       <p class="text-xs text-gray-500 mb-3">Running total since each teacher's join date: Billed = every month's salary, Paid = what has actually been paid, Due = Billed − Paid.</p>
       <div class="overflow-x-auto">
       <table class="w-full text-sm">
-        <thead><tr class="text-left border-b"><th class="py-2">Name</th><th>Subject</th><th>Total Billed</th><th>Total Paid</th><th>Total Due</th><th>Status</th><th>Combined voucher</th></tr></thead>
+        <thead><tr class="text-left border-b"><th class="py-2">Name</th><th>Subject</th><th>Total Billed</th><th>Total Paid</th><th>Total Due</th><th>Status</th></tr></thead>
         <tbody>${duesRows}</tbody>
       </table>
       </div>
@@ -2967,7 +2976,7 @@ function hmFees(){
       <p class="text-xs text-gray-500 mb-3">Running total since each student's admission date: Billed = every month's fee, Paid = what has actually been received, Due = Billed − Paid.</p>
       <div class="overflow-x-auto">
       <table class="w-full text-sm">
-        <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>Total Billed</th><th>Total Paid</th><th>Total Due</th><th>Status</th></tr></thead>
+        <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>Total Billed</th><th>Total Paid</th><th>Total Due</th><th>Status</th><th>Combined voucher</th></tr></thead>
         <tbody>${duesRows}</tbody>
       </table>
       </div>
@@ -3337,7 +3346,7 @@ function certDues(p){
 }
 
 function renderCertificateCard(rec){
-  const cfg=DB.config, st=rec.student, d=rec.data||{}, T=CERT_TYPES[rec.type]||CERT_TYPES.pass;
+  const cfg=Object.assign({}, DB.config, (rec.school&&rec.school.name)?{schoolName:rec.school.name}:{}), st=rec.student, d=rec.data||{}, T=CERT_TYPES[rec.type]||CERT_TYPES.pass;
   const g = st.gender, hisHer = g==='M'?'his':g==='F'?'her':'his/her', heShe = g==='M'?'he':g==='F'?'she':'he/she', himHer = g==='M'?'him':g==='F'?'her':'him/her', sonOf = g==='M'?'Son of':g==='F'?'Daughter of':'Son/Daughter of';
   const initials = (cfg.schoolName||'S').split(/\s+/).filter(w=>/^[A-Za-z]/.test(w)).slice(0,3).map(w=>w[0].toUpperCase()).join('') || 'S';
   let pre='This is to certify that', body='';
@@ -3356,11 +3365,12 @@ function renderCertificateCard(rec){
     pre='This certificate is proudly presented to';
     body = `of <b>Class ${esc(st.cls)}</b>, ${phrase} the <b>${esc(d.event)}</b> (${esc(d.category)}) held on <b>${certDate(d.eventDate)}</b>${d.organizer?`, organized by <b>${esc(d.organizer)}</b>`:''}. We appreciate the dedication shown and wish continued success.`;
   }
-  const hmName = cfg.headmasterAccount && cfg.headmasterAccount.name || '';
+  const hmName = (rec.school&&rec.school.hm) || (cfg.headmasterAccount && cfg.headmasterAccount.name) || '';
   const corner = (pos)=>`<div style="position:absolute;${pos};width:34px;height:34px;border:3px solid var(--gold);${pos.includes('top')?'border-bottom:none;':'border-top:none;'}${pos.includes('left')?'border-right:none;':'border-left:none;'}"></div>`;
   return `
   <div class="doc-frame max-w-2xl mx-auto" id="certificateCard" data-fname="${esc(st.name)}" style="min-height:990px;display:flex;flex-direction:column;background:var(--navy);padding:14px;border-radius:10px;">
     <div style="flex:1;position:relative;background:#fffdf8;border:2px solid var(--gold);padding:30px 40px 22px;display:flex;flex-direction:column;justify-content:space-between;background-image:radial-gradient(circle at 50% 0%, rgba(240,165,0,.10), transparent 55%);">
+      ${rec.voided?`<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:5;"><div style="transform:rotate(-24deg);border:6px solid rgba(220,38,38,.55);color:rgba(220,38,38,.55);font:800 4rem Georgia,serif;letter-spacing:10px;padding:4px 26px;border-radius:12px;">VOID</div></div>`:''}
       ${corner('top:8px;left:8px')}${corner('top:8px;right:8px')}${corner('bottom:8px;left:8px')}${corner('bottom:8px;right:8px')}
       <div style="text-align:center;">
         <div style="width:70px;height:70px;margin:0 auto 8px;border:3px solid var(--gold);border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;overflow:hidden;color:var(--gold-light);font-size:28px;">${cfg.logo?`<img src="${cfg.logo}" style="width:100%;height:100%;object-fit:cover;">`:'🎓'}</div>
@@ -3398,12 +3408,14 @@ function certPreviewHtml(rec){
   return `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('certificateCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('certificateCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` + renderCertificateCard(rec);
 }
 function viewCertificate(id){ LAST_CERT_ID=id; render(); setTimeout(()=>{ const e=document.getElementById('certPreview'); if(e) e.scrollIntoView({behavior:'smooth',block:'start'}); },50); }
-function deleteCertificate(id){
+/* Certificates are a permanent record: they are never deleted. A wrongly issued one can only be VOIDED —
+   it stays in the list (marked VOID, with the reason and date) and a re-print shows a VOID stamp. */
+function voidCertificate(id){
   ensureCertData();
-  const rec = DB.certificates.find(c=>c.id===id); if(!rec) return;
-  if(!confirm(`Delete certificate ${rec.serial} for ${rec.student.name}?\n\nThis removes it from the issued list (and from the parent's view).`)) return;
-  DB.certificates = DB.certificates.filter(c=>c.id!==id);
-  if(LAST_CERT_ID===id) LAST_CERT_ID=null;
+  const rec = DB.certificates.find(c=>c.id===id); if(!rec || rec.voided) return;
+  if(!confirm(`Void certificate ${rec.serial} for ${rec.student.name}?\n\nIt is NOT deleted — it stays in the record marked VOID, and the parent will no longer see it.`)) return;
+  const reason = (prompt('Reason for voiding (e.g. wrong name / wrong marks):','')||'').trim();
+  rec.voided = {on:todayISO(), reason:reason||'—'};
   saveDB(); render();
 }
 
@@ -3444,7 +3456,8 @@ function issueCertificate(){
   const n = (nums.length?Math.max(...nums):0)+1;
   const rec = {
     id:uid(), serial:`CERT-${yr}-${String(n).padStart(4,'0')}`, type, studentId:p.id, issuedOn:todayISO(),
-    student:{name:p.name, father:p.father||'', cls:p.cls, roll:p.roll, section:p.section||'', admissionDate:p.admissionDate||''},
+    student:{name:p.name, father:p.father||'', cls:p.cls, roll:p.roll, section:p.section||'', admissionDate:p.admissionDate||'', gender:p.gender||''},
+    school:{name:DB.config.schoolName, hm:(DB.config.headmasterAccount&&DB.config.headmasterAccount.name)||'', year:DB.config.year},   // frozen: a re-print always matches what was issued
     data:d
   };
   DB.certificates.push(rec); LAST_CERT_ID = rec.id;
@@ -3494,14 +3507,23 @@ function hmCertificates(){
         <div class="md:col-span-2">${lbl('Organized by <span class="font-normal text-gray-500">(optional)</span>')}<input id="cOrganizer" maxlength="60" placeholder="${esc(cfg.schoolName)}" ${inp}></div>`;
     }
   }
-  const issued = [...DB.certificates].reverse();
-  const logRows = issued.map(c=>`<tr class="border-b">
-      <td class="py-2 font-mono text-xs">${esc(c.serial)}</td>
+  /* Issued certificates — permanent, grouped class-wise (the class the student was in when it was issued). */
+  const logSel = (q('certLogCls') && q('certLogCls').value) || '__all';
+  const byCls = {}; DB.certificates.forEach(c=>{ const k=(c.student&&c.student.cls)||'—'; (byCls[k]=byCls[k]||[]).push(c); });
+  const clsKeys = Object.keys(byCls).sort((x,y)=>{ const ix=cfg.classes.indexOf(x), iy=cfg.classes.indexOf(y); return (ix<0?999:ix)-(iy<0?999:iy) || x.localeCompare(y); });
+  const rowOf = c=>`<tr class="border-b ${c.voided?'text-gray-400':''}">
+      <td class="py-2 font-mono text-xs ${c.voided?'line-through':''}">${esc(c.serial)}</td>
       <td>${esc((CERT_TYPES[c.type]||{}).label||c.type)}</td>
-      <td>${esc(c.student.name)} <span class="text-xs text-gray-500">(${esc(c.student.cls)})</span></td>
+      <td>${esc(c.student.name)} <span class="text-xs text-gray-500">· Roll ${esc(c.student.roll)}</span>${c.voided?` <span class="ann-badge bg-red-100 text-red-700">VOID</span><div class="text-xs">${esc(c.voided.reason)} · ${certDate(c.voided.on)}</div>`:''}</td>
       <td class="text-xs">${certDate(c.issuedOn)}</td>
-      <td class="whitespace-nowrap"><button onclick="viewCertificate('${c.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">👁️ View / Print</button><button onclick="deleteCertificate('${c.id}')" class="text-red-600 text-sm font-bold">🗑️</button></td>
-    </tr>`).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No certificates issued yet.</td></tr>`;
+      <td class="whitespace-nowrap"><button onclick="viewCertificate('${c.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">👁️ View / Print</button>${c.voided?'':`<button onclick="voidCertificate('${c.id}')" class="text-red-600 text-sm font-bold" title="Void (record is kept)">🚫 Void</button>`}</td>
+    </tr>`;
+  const logSections = clsKeys.filter(k=>logSel==='__all'||logSel===k).map(k=>{
+    const list = [...byCls[k]].reverse();
+    return `<div class="mb-5"><h3 class="font-bold text-[var(--navy)] mb-1">📚 Class ${esc(k)} <span class="text-xs font-normal text-gray-500">— ${list.length} certificate${list.length>1?'s':''}</span></h3>
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">No.</th><th>Type</th><th>Student</th><th>Issued</th><th>Action</th></tr></thead><tbody>${list.map(rowOf).join('')}</tbody></table></div></div>`;
+  }).join('') || '<p class="text-center text-gray-400 py-4">No certificates issued yet.</p>';
+  const logFilter = `<select id="certLogCls" onchange="render()" class="border rounded-lg px-3 py-2 text-sm"><option value="__all" ${logSel==='__all'?'selected':''}>All classes (${DB.certificates.length})</option>${clsKeys.map(k=>`<option value="${esc(k)}" ${logSel===k?'selected':''}>Class ${esc(k)} (${byCls[k].length})</option>`).join('')}</select>`;
   const last = LAST_CERT_ID && DB.certificates.find(c=>c.id===LAST_CERT_ID);
   return `
   <div class="space-y-5">
@@ -3518,18 +3540,15 @@ function hmCertificates(){
     `)}
     ${last?`<div id="certPreview">${certPreviewHtml(last)}</div>`:''}
     ${card(`
-      <h2 class="text-xl font-bold text-[var(--navy)] mb-3">🗂️ Issued Certificates</h2>
-      <p class="text-xs text-gray-500 mb-3">Every certificate has its own serial number and can be re-printed exactly as issued.</p>
-      <div class="overflow-x-auto"><table class="w-full text-sm">
-        <thead><tr class="text-left border-b"><th class="py-2">No.</th><th>Type</th><th>Student</th><th>Issued</th><th>Action</th></tr></thead>
-        <tbody>${logRows}</tbody>
-      </table></div>
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-2"><h2 class="text-xl font-bold text-[var(--navy)]">🗂️ Issued Certificates — Class-wise Record</h2>${logFilter}</div>
+      <p class="text-xs text-gray-500 mb-4">🔒 Permanent record: every certificate keeps its serial number and is filed under the class the student was in when it was issued — even after the student is promoted, passes out or is removed. Certificates can be re-printed exactly as issued; a wrong one can be voided but never deleted.</p>
+      ${logSections}
     `)}
   </div>`;
 }
 function renderParentCertificates(stu){
   ensureCertData();
-  const mine = DB.certificates.filter(c=>c.studentId===stu.id).reverse();
+  const mine = DB.certificates.filter(c=>c.studentId===stu.id && !c.voided).reverse();
   const last = LAST_CERT_ID && mine.find(c=>c.id===LAST_CERT_ID);
   const rows = mine.map(c=>`<tr class="border-b"><td class="py-2 font-mono text-xs">${esc(c.serial)}</td><td>${esc((CERT_TYPES[c.type]||{}).label||c.type)}</td><td class="text-xs">${certDate(c.issuedOn)}</td><td><button onclick="viewCertificate('${c.id}')" class="text-[var(--navy)] text-sm font-bold">👁️ View / Print</button></td></tr>`).join('')
     || `<tr><td colspan="4" class="text-center text-gray-400 py-4">No certificates have been issued yet.</td></tr>`;
