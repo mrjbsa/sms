@@ -272,8 +272,9 @@ function registryConfigured(){ return !!(MASTER_REGISTRY_FILE_ID && !MASTER_REGI
 /* Reads the registry trying every route that can work from a browser, in order, and reports ALL failures.
    Routes: (1) API key, plain request  (2) the school's own Google sign-in token (no key needed — works even
    if the API key is restricted)  (3) token + key  (no extra fallbacks: more requests only make Google's anti-abuse block worse). */
-function fetchRegistryJson(){
-  const id = MASTER_REGISTRY_FILE_ID;
+function fetchRegistryJson(){ return fetchDriveJson(MASTER_REGISTRY_FILE_ID); }
+/* Reads any shared Drive JSON file, trying every route that can work from a browser and reporting ALL failures. */
+function fetchDriveJson(id){
   const base = `https://www.googleapis.com/drive/v3/files/${id}?alt=media`;
   const tok = (typeof driveAccessToken!=='undefined' && driveAccessToken) ? {Authorization:'Bearer '+driveAccessToken} : null;
   const routes = [
@@ -551,6 +552,7 @@ function driveWithToken(fn, silent){
 /* One sync pass: upload if something is pending, otherwise fetch the latest from Drive. */
 function driveSyncCycle(){
   if(!navigator.onLine || !DRIVE_FILE_ID) { updateSyncBadge(); return Promise.resolve(); }
+  driveEnsurePublic();
   if(hasPending()){ return canWrite() ? driveSaveNow(true) : Promise.resolve(); }
   if(driveTokenValid()) return drivePullNow(true).then(()=>{ if(SESSION) render(); });
   return Promise.resolve();
@@ -565,6 +567,7 @@ function updateSyncBadge(){
   let txt='', bg='var(--navy)';
   if(!DRIVE_FILE_ID || !SESSION || SESSION.role==='parent'){ b.style.display='none'; return; }
   if(!navigator.onLine){ txt = hasPending() ? '📴 Offline — changes saved on this device, will upload when internet returns' : '📴 Offline — working from saved data'; bg='#b45309'; }
+  else if(DRIVE_NEEDS_ACCESS){ txt='🔒 Open Cloud Sync → “Allow access to school file” to upload'; bg='#b45309'; }
   else if(driveSaving){ txt='🔄 Saving to Google Drive…'; }
   else if(hasPending()){ txt = canWrite() ? '⏳ Uploading your changes…' : '⏳ Changes waiting — connect Google Drive to upload'; bg='#b45309'; }
   else if(driveLinked()){ txt='☁️ Saved to Google Drive'+(driveLastSync?' · '+driveLastSync.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):''); bg='#166534'; }
@@ -634,6 +637,7 @@ function driveCreateFile(){
   }).then(r=>r.json()).then(f=>{
     if(f.id){
       driveSetFileId(f.id);
+      driveEnsurePublic();                       // parents & teachers can read the school file straight away
       markSynced(JSON.stringify(DB)); setPending(false);
       driveLastSync = new Date();
       refreshApprovalStatus().then(()=>{
@@ -655,13 +659,24 @@ function drivePullNow(silent){
   }
   return driveWithToken(()=>
     fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}?alt=media`,{headers:{Authorization:'Bearer '+driveAccessToken}})
-    .then(r=>{ if(r.status===401){ driveTokenExp=0; } if(!r.ok) throw new Error('load failed ('+r.status+')'); return r.json(); })
+    .then(r=>{
+      if(r.status===401){ driveTokenExp=0; }
+      if(!r.ok){
+        // 404/403 = this Google account hasn't been given access to the file by the app yet (typical for teachers).
+        DRIVE_NEEDS_ACCESS = (r.status===404||r.status===403);
+        return fetchDriveJson(DRIVE_FILE_ID).catch(()=>{ throw new Error('load failed ('+r.status+')'); });
+      }
+      DRIVE_NEEDS_ACCESS=false; driveEnsurePublic();
+      return r.json();
+    })
     .then(data=>{
+      DRIVE_LOAD = {ok:true, err:''};
       if(hasPending()) return;                      // something was edited while this request was in flight — keep it
       DB = Object.assign(defaultDB(), data, {config:Object.assign(defaultDB().config, data.config||{})});
       const j=JSON.stringify(DB); localStorage.setItem(DB_KEY, j); markSynced(j);
       applyTheme(DB.config.theme); driveLastSync=new Date(); updateSyncBadge(); if(!silent) render();
     })
+    .then(()=>{ if(DRIVE_NEEDS_ACCESS && SESSION && SESSION.role!=='parent') setTimeout(()=>driveOfferPicker(), 600); })
     .catch(e=>{ if(!silent) alert('Could not load from Drive: '+e.message); }), silent);
 }
 function driveSaveNow(silent){
@@ -675,11 +690,14 @@ function driveSaveNow(silent){
       body: sent
     }).then(r=>{
       if(r.status===401){ driveTokenExp=0; throw new Error('sign-in expired — renewing'); }
+      if(r.status===404||r.status===403){ DRIVE_NEEDS_ACCESS=true; const e=new Error('no access to the school file yet'); e.needsAccess=true; throw e; }
       if(!r.ok) throw new Error('save failed ('+r.status+')');
       markSynced(sent); driveLastSync=new Date();
       if(JSON.stringify(DB)===sent) setPending(false); else driveAutoSave();   // edited during upload -> go again
       if(!silent) render();
-    }).catch(e=>{ if(!silent) alert('Could not save to Drive: '+e.message); setTimeout(()=>driveSyncCycle(), 15000); })
+    }).catch(e=>{
+      if(e&&e.needsAccess){ driveOfferPicker(); updateSyncBadge(); return; }       // ask once instead of failing every 15s
+      if(!silent) alert('Could not save to Drive: '+e.message); setTimeout(()=>driveSyncCycle(), 15000); })
       .finally(()=>{ driveSaving=false; updateSyncBadge(); });
   }, silent);
 }
@@ -689,12 +707,72 @@ function driveAutoSave(){
   driveAutoTimer = setTimeout(()=>driveSaveNow(true), 1500);
 }
 /* Parents read the shared file with just the public API key — no Google sign-in needed */
+/* Everyone (parents, teachers, a new device) first loads the school's data WITHOUT signing in: the school file is shared
+   "anyone with the link: viewer" and read with the public key. The result is remembered so the login screen can say
+   plainly when the data could not be loaded, instead of silently showing an empty school. */
+let DRIVE_LOAD = {ok:null, err:''};
 function driveParentPull(silent){
-  if(!DRIVE_FILE_ID || !GOOGLE_API_KEY || GOOGLE_API_KEY.includes('PASTE') || !navigator.onLine || hasPending()) return Promise.resolve();
-  return fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`)
-    .then(r=>{ if(!r.ok) throw new Error('fetch failed'); return r.json(); })
-    .then(data=>{ if(hasPending()) return; DB = Object.assign(defaultDB(), data, {config:Object.assign(defaultDB().config, data.config||{})}); const j=JSON.stringify(DB); localStorage.setItem(DB_KEY, j); if(driveLinked()||syncedHash()) markSynced(j); applyTheme(DB.config.theme); driveLastSync=new Date(); if(!silent) render(); })
-    .catch(()=>{});
+  if(!DRIVE_FILE_ID || !navigator.onLine || hasPending()) return Promise.resolve();
+  return fetchDriveJson(DRIVE_FILE_ID)
+    .then(data=>{
+      DRIVE_LOAD = {ok:true, err:''};
+      if(hasPending()) return;
+      DB = Object.assign(defaultDB(), data, {config:Object.assign(defaultDB().config, data.config||{})});
+      const j=JSON.stringify(DB); localStorage.setItem(DB_KEY, j); if(driveLinked()||syncedHash()) markSynced(j);
+      applyTheme(DB.config.theme); driveLastSync=new Date(); if(!silent) render();
+    })
+    .catch(e=>{ DRIVE_LOAD = {ok:false, err:(e&&e.message)||'network error'}; if(!silent) render(); });
+}
+function loadFailHtml(){
+  return `<div class="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 mb-4">
+    <b>⚠️ This school's data could not be loaded.</b> Check your internet and try again. If it keeps failing, ask the Headmaster to open <b>Cloud Sync</b> once (it makes the school file readable for parents and teachers).
+    <div class="mt-1 text-[11px] opacity-80 break-all">Detail: ${esc(DRIVE_LOAD.err||'unknown')}</div>
+    <button onclick="retryLoadSchool()" class="mt-2 navy-btn rounded-lg px-4 py-1.5 font-bold">🔄 Try again</button></div>`;
+}
+function retryLoadSchool(){ DRIVE_LOAD={ok:null,err:''}; driveParentPull(true).then(()=>render()); }
+/* The Headmaster's own Google account always keeps the school file readable by link (parents/teachers need this to see data). */
+let drivePublicEnsured=false;
+function driveEnsurePublic(){
+  if(drivePublicEnsured || !driveAccessToken || !DRIVE_FILE_ID || !SESSION || SESSION.role!=='headmaster') return;
+  drivePublicEnsured=true;
+  fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}/permissions?fields=permissions(type,role)`,{headers:{Authorization:'Bearer '+driveAccessToken}})
+    .then(r=>r.ok?r.json():Promise.reject(new Error('perm list '+r.status)))
+    .then(j=>{ if((j.permissions||[]).some(x=>x.type==='anyone')) return;
+      return fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}/permissions`,{method:'POST',headers:{Authorization:'Bearer '+driveAccessToken,'Content-Type':'application/json'},body:JSON.stringify({type:'anyone',role:'reader'})}); })
+    .catch(()=>{ drivePublicEnsured=false; });
+}
+/* ---- Teachers: Google's "drive.file" permission only covers files this app made OR files the person picks
+   with Google's own file picker. So a teacher the Headmaster shared the file with must pick it ONCE. ---- */
+let DRIVE_NEEDS_ACCESS=false, drivePickerAsked=false, drivePickerLoading=null;
+function driveLoadPicker(){
+  if(drivePickerLoading) return drivePickerLoading;
+  drivePickerLoading = new Promise((res,rej)=>{
+    const sc=document.createElement('script'); sc.src='https://apis.google.com/js/api.js';
+    sc.onload=()=>gapi.load('picker',{callback:res,onerror:()=>rej(new Error('picker failed to load'))});
+    sc.onerror=()=>rej(new Error('Google Picker could not be loaded (internet?)'));
+    document.head.appendChild(sc);
+  }).catch(e=>{ drivePickerLoading=null; throw e; });
+  return drivePickerLoading;
+}
+function driveGrantFileAccess(){
+  return driveEnsureToken().then(driveLoadPicker).then(()=>new Promise((resolve,reject)=>{
+    const view = new google.picker.DocsView().setFileIds(DRIVE_FILE_ID).setIncludeFolders(false);
+    new google.picker.PickerBuilder().addView(view)
+      .setOAuthToken(driveAccessToken).setDeveloperKey(GOOGLE_API_KEY).setAppId(GOOGLE_CLIENT_ID.split('-')[0])
+      .setTitle('Select your school data file')
+      .setCallback(d=>{ if(d.action==='picked') resolve(true); else if(d.action==='cancel') reject(new Error('cancelled')); })
+      .build().setVisible(true);
+  }));
+}
+function driveOfferPicker(force){
+  if(!DRIVE_FILE_ID || !navigator.onLine || !driveAccessToken) return Promise.resolve(false);
+  if(drivePickerAsked && !force) return Promise.resolve(false);
+  drivePickerAsked=true;
+  if(!confirm('To save your work to this school\'s Google Drive file, Google needs you to select that file ONCE.\n\nTap OK, then choose the file shown (the Headmaster shared it with your Gmail).')) return Promise.resolve(false);
+  return driveGrantFileAccess()
+    .then(()=>{ DRIVE_NEEDS_ACCESS=false; return driveSyncCycle(); })
+    .then(()=>{ if(SESSION) render(); return true; })
+    .catch(e=>{ if(e&&e.message!=='cancelled') alert('Could not get access: '+e.message+'\n\nMake sure the Headmaster shared the file with exactly this Gmail (Teachers tab → Grant Drive Access), and that Google Picker API is enabled for the app.'); return false; });
 }
 function driveMakePublicReadable(){
   if(!driveAccessToken || !DRIVE_FILE_ID){ alert('Connect Google Drive first.'); return; }
@@ -725,6 +803,7 @@ function renderCloudSyncPanel(){
     ${!DRIVE_FILE_ID?'<p class="text-sm text-amber-600 mb-3">No data file yet for this school — click Connect below to create one (do this once, as Headmaster).</p>':''}
     <div class="flex flex-wrap gap-3">
       ${driveLinked()?'':`<button onclick="driveConnect()" class="navy-btn rounded-lg px-5 py-2 font-bold">🔗 Connect Google Drive</button>`}
+      ${(driveLinked() && DRIVE_FILE_ID && SESSION && SESSION.role==='teacher')?`<button onclick="driveOfferPicker(true)" class="gold-btn rounded-lg px-5 py-2 font-bold ${DRIVE_NEEDS_ACCESS?'':'opacity-80'}">🔓 Allow access to school file</button>`:''}
       <button onclick="driveSaveNow(false)" class="gold-btn rounded-lg px-5 py-2 font-bold">⬆️ Save Now</button>
       <button onclick="drivePullNow(false)" class="bg-gray-200 rounded-lg px-5 py-2 font-bold">⬇️ Load Latest</button>
       ${DRIVE_FILE_ID?`<button onclick="driveMakePublicReadable()" class="bg-purple-600 text-white rounded-lg px-5 py-2 font-bold">👀 Enable Parent Viewing</button>`:''}
@@ -759,7 +838,7 @@ setInterval(()=>{
   const doApproval = Date.now()>=APPROVAL_NEXT_AT ? refreshApprovalStatus() : Promise.resolve();
   doApproval.then(()=>{
     if(hasPending() && canWrite()){ return driveSyncCycle(); }
-    if(SESSION && SESSION.role==='parent'){ return driveParentPull(true).then(()=>{ if(SESSION) render(); }); }
+    if(SESSION && (SESSION.role==='parent' || (SESSION.role==='teacher' && !driveLinked()))){ return driveParentPull(true).then(()=>{ if(SESSION) render(); }); }
     if(DRIVE_FILE_ID && driveLinked() && !hasPending()){ return driveSyncCycle().then(()=>{ if(SESSION) render(); }); }
     if(SESSION){ render(); } // catches a plan that just expired/got denied, even with nothing else to sync
   });
@@ -1279,6 +1358,7 @@ function renderLogin(){
               <button data-role="${r}" class="role-tab flex-1 py-2 ${i===0?'tab-btn active':''} bg-gray-50" onclick="selectRole('${r}')">${r[0].toUpperCase()+r.slice(1)}</button>
             `).join('')}
           </div>
+          ${(DRIVE_FILE_ID && DRIVE_LOAD.ok===false)?loadFailHtml():''}
           <div id="loginFields"></div>
           <div id="loginError" class="text-red-600 text-sm mt-2 hidden"></div>
           <button onclick="doLogin()" class="w-full navy-btn rounded-lg py-2.5 mt-4 font-bold">Login</button>
@@ -1300,7 +1380,9 @@ function selectRole(role){
   document.querySelectorAll('.role-tab').forEach(b=>b.classList.toggle('active', b.dataset.role===role));
   const box = document.getElementById('loginFields');
   if(role==='headmaster'){
-    if(!hmAccountExists()){
+    if(!hmAccountExists() && DRIVE_FILE_ID && DRIVE_LOAD.ok===false){
+      box.innerHTML = `<p class="text-sm text-gray-600">Headmaster login will appear as soon as this school's data loads.</p>`;
+    } else if(!hmAccountExists()){
       box.innerHTML = `<p class="text-xs text-gray-500 mb-3">First time here — create your Headmaster login.</p>
         <label class="block text-sm font-bold mb-1">School Name</label>
         <input id="hmNewSchool" type="text" value="${esc(DB.config.schoolName==='My School'?'':DB.config.schoolName)}" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Al-Noor Public School">
@@ -1338,6 +1420,7 @@ function doLogin(){
   function showErr(msg){ err.textContent=msg; err.classList.remove('hidden'); }
 
   if(CURRENT_ROLE==='headmaster'){
+    if(!hmAccountExists() && DRIVE_FILE_ID && DRIVE_LOAD.ok===false){ showErr("This school's data has not loaded yet, so a new Headmaster account can't be created. Press “Try again” above."); return; }
     if(!hmAccountExists()){
       const name = document.getElementById('hmNewName').value.trim();
       const p1 = document.getElementById('hmNewPass').value;
@@ -3564,7 +3647,9 @@ function renderParentCertificates(stu){
 
 function render(){
   if(!SESSION){ renderLogin(); return; }
-  if(registryConfigured() && DRIVE_FILE_ID && APPROVAL_STATE.status!=='approved'){
+  /* The Headmaster (the paying party) is blocked until approved. Teachers & parents are blocked only by a REAL
+     'declined / expired' answer — never by a mere 'could not check', which would lock a whole school out. */
+  if(registryConfigured() && DRIVE_FILE_ID && APPROVAL_STATE.status!=='approved' && (SESSION.role==='headmaster' || APPROVAL_STATE.status==='denied' || APPROVAL_STATE.status==='expired')){
     GATE_SHOWN = true;
     document.getElementById('app').innerHTML = renderApprovalGate();
     return;
