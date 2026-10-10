@@ -15,6 +15,27 @@ const DEFAULT_SUBJECTS = ['English','Mathematics','Science','Urdu','Social Studi
 const DEFAULT_CLASSES  = ['1st','2nd','3rd','4th','5th','6th','7th','8th','9th','10th'];
 /* A school can teach anywhere from 1st up to 12th at most; the Headmaster picks the highest class in School Setup. */
 const ALL_CLASSES = ['1st','2nd','3rd','4th','5th','6th','7th','8th','9th','10th','11th','12th'];
+/* 11th & 12th are split into streams (groups). Each stream is its OWN class — "11th Pre-Medical" — so it gets its own
+   subjects, monthly fee, timetable and teachers, and everything that works per class keeps working. */
+const STREAMS = ['Pre-Engineering','Pre-Medical'];
+const STREAM_SUBJECTS = {
+  'Pre-Engineering':['English','Urdu','Physics','Chemistry','Mathematics','Computer Science'],
+  'Pre-Medical':['English','Urdu','Physics','Chemistry','Biology','Islamiat']
+};
+function classLevel(c){ const n=parseInt(c,10); return isNaN(n)?0:n; }
+function classStream(c){ const m=String(c||'').match(/^\d+(?:st|nd|rd|th)\s+(.+)$/); return m?m[1]:''; }
+function buildClasses(top){
+  const n = ALL_CLASSES.indexOf(top), out=[];
+  ALL_CLASSES.slice(0,n+1).forEach(c=>{ if(c==='11th'||c==='12th') STREAMS.forEach(st=>out.push(c+' '+st)); else out.push(c); });
+  return out;
+}
+function nextClassOptions(cls){ const L=classLevel(cls); return DB.config.classes.filter(c=>classLevel(c)===L+1); }
+function nextClassFor(cls, streamPick){
+  const cands = nextClassOptions(cls); if(!cands.length) return null;
+  if(cands.length===1) return cands[0];
+  const S = classStream(cls) || streamPick || '';
+  return cands.find(c=>classStream(c)===S) || 'NEEDS';
+}
 const EXAMS = [{key:'pt1',label:'PT-1'},{key:'pt2',label:'PT-2'},{key:'mid',label:'Mid Term'},{key:'final',label:'Final Term'}];
 
 /* ============================================================
@@ -38,7 +59,7 @@ const PK_FIXED_HOLIDAYS = [
 function defaultDB(){
   return {
     config:{
-      schoolName:'Mister JB High School',
+      schoolName:'My School',
       logo:null,
       assemblyStart:'08:00', assemblyEnd:'08:15',
       schoolEnd:'14:40',
@@ -405,7 +426,7 @@ function renderApprovalWelcome(){
         <p class="text-gray-700 text-sm">Thank you for registering. You can now use the full dashboard.</p>
         <button onclick="openDashboardAfterApproval()" class="navy-btn rounded-lg px-6 py-2.5 font-bold">Open Dashboard →</button>
       </div>
-      <div class="doc-footer"><span class="lead">Learn Today</span><span class="lead2">Lead Tomorrow</span></div>
+      <div class="doc-footer"><span class="lead">${esc(tag1())}</span><span class="lead2">${esc(tag2())}</span></div>
     </div>
   </div>`;
 }
@@ -423,7 +444,7 @@ function renderApprovalGate(){
           ${gateCheckButton()}
           <button onclick="logout()" class="text-sm text-gray-500 underline mt-2 block mx-auto">⬅️ Back to Login</button>
         </div>
-        <div class="doc-footer"><span class="lead">Learn Today</span><span class="lead2">Lead Tomorrow</span></div>
+        <div class="doc-footer"><span class="lead">${esc(tag1())}</span><span class="lead2">${esc(tag2())}</span></div>
       </div>
     </div>`;
   }
@@ -441,7 +462,7 @@ function renderApprovalGate(){
           ${gateCheckButton()}
           <button onclick="logout()" class="text-sm text-gray-500 underline mt-2 block mx-auto">⬅️ Back to Login</button>
         </div>
-        <div class="doc-footer"><span class="lead">Learn Today</span><span class="lead2">Lead Tomorrow</span></div>
+        <div class="doc-footer"><span class="lead">${esc(tag1())}</span><span class="lead2">${esc(tag2())}</span></div>
       </div>
     </div>`;
   }
@@ -471,7 +492,7 @@ function renderApprovalGate(){
         <button onclick="logout()" class="text-sm text-gray-500 underline mt-2 block mx-auto">⬅️ Back to Login</button>
         <p class="text-xs text-gray-400 mt-2">Questions? 📧 ${esc(OWNER_CONTACT_EMAIL)}</p>
       </div>
-      <div class="doc-footer"><span class="lead">Learn Today</span><span class="lead2">Lead Tomorrow</span></div>
+      <div class="doc-footer"><span class="lead">${esc(tag1())}</span><span class="lead2">${esc(tag2())}</span></div>
     </div>
   </div>`;
 }
@@ -774,11 +795,15 @@ function grade(pct){
   for(const g of sorted){ if(pct>=Number(g.min)) return g.label; }
   return sorted.length? sorted[sorted.length-1].label : 'F';
 }
+function tag1(){ const v=DB.config&&DB.config.tag1; return (v!=null&&v!=='')?v:'Learn Today'; }
+function tag2(){ const v=DB.config&&DB.config.tag2; return (v!=null&&v!=='')?v:'Lead Tomorrow'; }
 function esc(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 /* Subjects are configurable per-class; falls back to the school-wide default list */
 function subjectsForClass(cls){
   const custom = DB.config.classSubjects && DB.config.classSubjects[cls];
-  return (custom && custom.length) ? custom : DB.config.subjects;
+  if(custom && custom.length) return custom;
+  const st = classStream(cls);
+  return (st && STREAM_SUBJECTS[st]) ? STREAM_SUBJECTS[st] : DB.config.subjects;
 }
 /* Each exam (PT-1, PT-2, Mid, Final) is out of 100 marks per subject.
    The OVERALL marksheet (obtained / grade / result) follows a PROGRESSIVE rule:
@@ -944,8 +969,8 @@ function renderTimetableCard(opts={}){
       </table>
     </div>
     <div class="doc-footer">
-      <span class="lead">Learn Today</span>
-      <span class="lead2">Lead Tomorrow</span>
+      <span class="lead">${esc(tag1())}</span>
+      <span class="lead2">${esc(tag2())}</span>
     </div>
   </div>`;
 }
@@ -1046,8 +1071,8 @@ function renderMarksheetCard(student, marksData, yearLabel){
       </div>
     </div>
     <div class="doc-footer">
-      <span class="lead">Learn Today</span>
-      <span class="lead2">Lead Tomorrow</span>
+      <span class="lead">${esc(tag1())}</span>
+      <span class="lead2">${esc(tag2())}</span>
     </div>
   </div>`;
 }
@@ -1260,8 +1285,8 @@ function renderLogin(){
           <p class="text-center text-xs text-gray-400 mt-3"><a href="privacy-policy.html" target="_blank" class="underline">Privacy Policy</a> · <a href="terms-of-service.html" target="_blank" class="underline">Terms of Service</a></p>
         </div>
         <div class="doc-footer">
-          <span class="lead">Learn Today</span>
-          <span class="lead2">Lead Tomorrow</span>
+          <span class="lead">${esc(tag1())}</span>
+          <span class="lead2">${esc(tag2())}</span>
         </div>
       </div>
     </div>
@@ -1277,6 +1302,8 @@ function selectRole(role){
   if(role==='headmaster'){
     if(!hmAccountExists()){
       box.innerHTML = `<p class="text-xs text-gray-500 mb-3">First time here — create your Headmaster login.</p>
+        <label class="block text-sm font-bold mb-1">School Name</label>
+        <input id="hmNewSchool" type="text" value="${esc(DB.config.schoolName==='My School'?'':DB.config.schoolName)}" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Al-Noor Public School">
         <label class="block text-sm font-bold mb-1">Your Name</label>
         <input id="hmNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Muhammad Bilal">
         <label class="block text-sm font-bold mb-1">Create Password</label>
@@ -1316,9 +1343,12 @@ function doLogin(){
       const p1 = document.getElementById('hmNewPass').value;
       const p2 = document.getElementById('hmNewPass2').value;
       const gmail = (typeof driveConnectedEmail!=='undefined' && driveConnectedEmail) ? driveConnectedEmail : '';
+      const schoolName = (document.getElementById('hmNewSchool')||{value:''}).value.trim();
+      if(!schoolName){ showErr('Please enter your school name — it appears on every certificate, voucher and marksheet.'); return; }
       if(!name || !p1){ showErr('Please enter your name and a password.'); return; }
       if(p1.length<4){ showErr('Password should be at least 4 characters.'); return; }
       if(p1!==p2){ showErr('Passwords do not match.'); return; }
+      DB.config.schoolName = schoolName;
       DB.config.headmasterAccount = {name, password:p1, gmail};
       saveDB();
       setSession({role:'headmaster'}); render(); return;
@@ -1419,7 +1449,7 @@ function card(inner, extra=''){ return `<div class="bg-white rounded-2xl shadow 
 
 function hmSetup(){
   const c = DB.config;
-  let topIdx = Math.max(...c.classes.map(x=>ALL_CLASSES.indexOf(x)));
+  let topIdx = Math.max(...c.classes.map(x=>classLevel(x)))-1;
   if(!(topIdx>=0)) topIdx = Math.min(Math.max(c.classes.length,1),12)-1;
   const csClass = document.getElementById('csClassSel')?.value || c.classes[0];
   return `
@@ -1442,6 +1472,10 @@ function hmSetup(){
         <input id="cfgPass" type="number" value="${c.passPercent}" class="w-full border rounded-lg px-3 py-2"></div>
       <div><label class="block text-sm font-bold mb-1">School Logo (optional)</label>
         <input id="cfgLogo" type="file" accept="image/*" class="w-full border rounded-lg px-3 py-2"></div>
+      <div><label class="block text-sm font-bold mb-1">School Motto — line 1</label>
+        <input id="cfgTag1" value="${esc(tag1())}" class="w-full border rounded-lg px-3 py-2"></div>
+      <div><label class="block text-sm font-bold mb-1">School Motto — line 2</label>
+        <input id="cfgTag2" value="${esc(tag2())}" class="w-full border rounded-lg px-3 py-2"></div>
       <div><label class="block text-sm font-bold mb-1">Default Subjects (used if a class has no custom list)</label>
         <input id="cfgSubjects" value="${esc(c.subjects.join(', '))}" class="w-full border rounded-lg px-3 py-2"></div>
       <div class="md:col-span-2"><label class="block text-sm font-bold mb-1">Classes your school teaches</label>
@@ -1450,7 +1484,7 @@ function hmSetup(){
           <select id="cfgTopClass" class="border rounded-lg px-3 py-2">${ALL_CLASSES.map((x,i)=>`<option value="${x}" ${i===topIdx?'selected':''}>${x}</option>`).join('')}</select>
           <span class="text-xs text-gray-500">(maximum 12th) · currently: ${esc(c.classes.join(', '))}</span>
         </div>
-        <p class="text-xs text-gray-500 mt-1">Promotion follows this order, and the highest class is where students pass out. If you add 11th/12th, set their subjects in "Class-wise Subjects" below.</p>
+        <p class="text-xs text-gray-500 mt-1">Promotion follows this order, and the highest class is where students pass out. 11th and 12th are automatically split into <b>Pre-Engineering</b> and <b>Pre-Medical</b> — each with its own subjects, fee, timetable and teachers (edit subjects in "Class-wise Subjects" below). When promoting from 10th you choose each student's stream.</p>
       </div>
     </div>
     <button onclick="saveSetup()" class="navy-btn rounded-lg px-5 py-2 mt-4 font-bold">Save Setup</button>
@@ -1531,7 +1565,9 @@ function saveSetup(){
   let newClasses = null;
   const topSel = document.getElementById('cfgTopClass');
   if(topSel){
-    newClasses = ALL_CLASSES.slice(0, ALL_CLASSES.indexOf(topSel.value)+1);
+    newClasses = buildClasses(topSel.value);
+    // keep an old plain "11th"/"12th" class only while students are still in it (from before streams existed)
+    ['12th','11th'].forEach(L=>{ if(c.classes.includes(L) && DB.students.some(st=>st.cls===L) && ALL_CLASSES.indexOf(L)<=ALL_CLASSES.indexOf(topSel.value)){ const i=newClasses.findIndex(x=>classLevel(x)===classLevel(L)); newClasses.splice(i<0?newClasses.length:i,0,L); } });
     const dropped = c.classes.filter(x=>!newClasses.includes(x));
     const orphans = DB.students.filter(st=>dropped.includes(st.cls));
     if(orphans.length && !confirm(`${orphans.length} student(s) are in classes that would no longer exist (${[...new Set(orphans.map(st=>st.cls))].join(', ')}), so they would vanish from every class list.\n\nMove them first (Students → Edit), or press Cancel to keep the current classes.\n\nPress OK only if you really want to continue.`)) return;
@@ -1542,6 +1578,7 @@ function saveSetup(){
   c.assemblyEnd = document.getElementById('cfgAEnd').value;
   c.schoolEnd = document.getElementById('cfgEnd').value;
   c.passPercent = Number(document.getElementById('cfgPass').value)||40;
+  c.tag1 = (document.getElementById('cfgTag1')||{value:''}).value.trim(); c.tag2 = (document.getElementById('cfgTag2')||{value:''}).value.trim();
   c.subjects = document.getElementById('cfgSubjects').value.split(',').map(s=>s.trim()).filter(Boolean);
   if(newClasses) c.classes = newClasses;
   const logoInput = document.getElementById('cfgLogo');
@@ -2069,14 +2106,18 @@ function hmPromotion(){
   const classes = DB.config.classes;
   const clsSel = document.getElementById('promoClassSel')?.value || classes[0];
   const students = DB.students.filter(s=>s.cls===clsSel);
+  const cands = nextClassOptions(clsSel);
+  const needsStream = cands.length>1 && !classStream(clsSel);
+  const streamOpts = cands.map(c=>classStream(c)).filter(Boolean);
   const rows = students.map(s=>{
     const pct = computeOverallPct(s);
     const autoPass = pct >= (DB.config.passPercent||40);
     return `<tr class="border-b">
       <td class="py-2">${esc(s.roll)}</td><td>${esc(s.name)}</td><td>${pct.toFixed(2)}%</td>
       <td><input type="checkbox" class="promoCheck w-5 h-5" data-id="${s.id}" ${autoPass?'checked':''}></td>
+      ${needsStream?`<td><select class="promoStream border rounded-lg px-2 py-1" data-id="${s.id}"><option value="">Select stream…</option>${streamOpts.map(x=>`<option>${esc(x)}</option>`).join('')}</select></td>`:''}
     </tr>`;
-  }).join('') || `<tr><td colspan="4" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
+  }).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
   return card(`
     <h2 class="text-xl font-bold text-[var(--navy)] mb-4">🎓 Promotion System</h2>
     <div class="flex flex-wrap gap-3 items-end mb-4">
@@ -2087,28 +2128,32 @@ function hmPromotion(){
       <div><label class="block text-sm font-bold mb-1">Pass %</label>
         <input id="promoPassPct" type="number" value="${DB.config.passPercent}" class="border rounded-lg px-3 py-2 w-24"></div>
       <button onclick="applyPassPct()" class="navy-btn rounded-lg px-4 py-2 font-bold">Apply %</button>
+      ${needsStream?`<div><label class="block text-sm font-bold mb-1">Set stream for all</label>
+        <select onchange="document.querySelectorAll('.promoStream').forEach(x=>x.value=this.value)" class="border rounded-lg px-3 py-2"><option value="">—</option>${streamOpts.map(x=>`<option>${esc(x)}</option>`).join('')}</select></div>`:''}
     </div>
     <p class="text-sm text-gray-500 mb-2">Tick the students who should PASS and move up. Unticked students are marked FAIL / stay back.</p>
-    ${clsSel===classes[classes.length-1]?'<p class="text-sm text-amber-700 mb-2">🎓 This is the highest class — promoted students are moved to the Alumni list (still available in Certificates).</p>':''}
+    ${needsStream?`<p class="text-sm text-blue-700 mb-2">🧬 These students move to 11th — choose each student's stream (${streamOpts.map(esc).join(' or ')}). They go into that stream's class with its own subjects.</p>`:''}
+    ${(classStream(clsSel)&&cands.length)?`<p class="text-sm text-blue-700 mb-2">Students stay in the same stream and move to <b>${esc(cands[0])}</b>.</p>`:''}
+    ${!cands.length?'<p class="text-sm text-amber-700 mb-2">🎓 This is the highest class — promoted students are moved to the Alumni list (still available in Certificates).</p>':''}
     <div class="overflow-x-auto">
     <table class="w-full text-sm">
-      <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>%</th><th>Promote?</th></tr></thead>
+      <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>%</th><th>Promote?</th>${needsStream?'<th>Stream</th>':''}</tr></thead>
       <tbody>${rows}</tbody>
     </table>
     </div>
-    <button onclick="promoteClass('${clsSel}')" class="navy-btn rounded-lg px-5 py-2 mt-4 font-bold">🚀 Promote Selected Students</button>
+    <button onclick="promoteClass('${esc(clsSel)}')" class="navy-btn rounded-lg px-5 py-2 mt-4 font-bold">🚀 Promote Selected Students</button>
     <span id="promoMsg" class="ml-3 text-green-600 font-bold hidden">Done!</span>
   `);
 }
 function applyPassPct(){ DB.config.passPercent = Number(document.getElementById('promoPassPct').value)||40; saveDB(); render(); }
 function promoteClass(cls){
   ensureCertData();
-  const classes = DB.config.classes;
-  const idx = classes.indexOf(cls);
-  const isLast = idx>=0 && idx===classes.length-1;
-  const nextClass = idx>=0 && !isLast ? classes[idx+1] : cls;
+  const isLast = nextClassOptions(cls).length===0;
   const checks = [...document.querySelectorAll('.promoCheck')];
   const chosen = checks.filter(c=>c.checked).map(c=>DB.students.find(st=>st.id===c.dataset.id)).filter(Boolean);
+  const pickOf = id => ((document.querySelector(`.promoStream[data-id="${id}"]`)||{}).value||'');
+  const missing = chosen.filter(st=>nextClassFor(cls, pickOf(st.id))==='NEEDS');
+  if(missing.length){ alert(`Please choose the stream (${STREAMS.join(' / ')}) for: ${missing.slice(0,6).map(st=>st.name).join(', ')}${missing.length>6?'…':''}`); return; }
   if(isLast && chosen.length){
     const owing = chosen.filter(st=>feeSummary(st).totalDue>0);
     let msg = `${cls} is this school's highest class.\n\n${chosen.length} selected student(s) will be marked PASSED OUT and moved to the Alumni list (their records stay available for Pass / Leaving / Character certificates).`;
@@ -2129,7 +2174,7 @@ function promoteClass(cls){
         DB.alumni.push(Object.assign({}, stu, {finalPct:computeOverallPct(stu), finalClass:stu.cls, passedOutOn:todayISO(), passedOutYear:DB.config.year}));
         passedOut.push(stu.id);
       } else {
-        stu.cls = nextClass;
+        stu.cls = nextClassFor(cls, pickOf(stu.id));
       }
       delete DB.marks[stu.id];
     } else {
@@ -2456,6 +2501,9 @@ function hmAnnouncements(){
    Parent views history and prints a voucher.
    ============================================================ */
 function currentMonthKey(){ return todayISO().slice(0,7); }
+/* A student owes fees only from the month of admission onward — earlier months never count. */
+function feeStartMonth(stu){ return (stu.admissionDate || schoolYearStart()).slice(0,7); }
+function feeApplies(stu, month){ return month >= feeStartMonth(stu); }
 function feeAmountFor(cls){ return Number((DB.config.classFee||{})[cls]) || 0; }
 /* ---- shared money model (fees AND salaries): one record = {amount, paid, status, paidOn, auto, manual} ----
    amount = what is billed for the month, paid = what has actually been received (partial payments allowed).
@@ -2482,8 +2530,10 @@ function ensureFeeRecord(studentId, month, cls){
   return r;
 }
 function setClassFee(cls,val){ if(!DB.config.classFee) DB.config.classFee={}; DB.config.classFee[cls]=Math.max(0,Number(val)||0); saveDB(); render(); }
-function setFeeAmount(studentId,month,cls,val){ const r=ensureFeeRecord(studentId,month,cls); r.amount=Math.max(0,Number(val)||0); r.manual=true; recSync(r); saveDB(); render(); }
+function feeGuard(studentId,month){ const stu=DB.students.find(x=>x.id===studentId); if(stu && !feeApplies(stu,month)){ alert(`${stu.name} was admitted in ${monthLabel(feeStartMonth(stu))}, so no fee applies for ${monthLabel(month)}.`); render(); return false; } return true; }
+function setFeeAmount(studentId,month,cls,val){ if(!feeGuard(studentId,month)) return; const r=ensureFeeRecord(studentId,month,cls); r.amount=Math.max(0,Number(val)||0); r.manual=true; recSync(r); saveDB(); render(); }
 function setFeeReceived(studentId,month,cls,val){
+  if(!feeGuard(studentId,month)) return;
   const r=ensureFeeRecord(studentId,month,cls); const a=recAmount(r);
   let p=Math.max(0,Number(val)||0);
   if(p>a){ alert(`Received amount cannot be more than the fee for this month (${rs(a)}).`); p=a; }
@@ -2491,6 +2541,7 @@ function setFeeReceived(studentId,month,cls,val){
   r.paid=p; recSync(r); saveDB(); render();
 }
 function setFeeStatus(studentId,month,cls,status){
+  if(!feeGuard(studentId,month)) return;
   const r=ensureFeeRecord(studentId,month,cls);
   if(status==='Paid'){ r.paid=recAmount(r); r.paidOn=todayISO(); } else { r.paid=0; r.paidOn=null; }
   recSync(r); saveDB(); render();
@@ -2527,8 +2578,8 @@ function renderFeeVoucherCard(student, month){
       <p class="text-xs text-gray-500">Please pay before the due date to avoid a late fee. This voucher is computer-generated and valid without signature.</p>
     </div>
     <div class="doc-footer">
-      <span class="lead">Learn Today</span>
-      <span class="lead2">Lead Tomorrow</span>
+      <span class="lead">${esc(tag1())}</span>
+      <span class="lead2">${esc(tag2())}</span>
     </div>
   </div>`;
 }
@@ -2610,6 +2661,7 @@ function hmDashboard(){
   const cm = currentMonthKey();
   let pendingCount=0, pendingAmount=0;
   DB.students.forEach(s=>{
+    if(!feeApplies(s, cm)) return;
     const rec = recSync(ensureFeeRecord(s.id, cm, s.cls));
     if(recBalance(rec)>0){ pendingCount++; pendingAmount+=recBalance(rec); }
   });
@@ -2744,8 +2796,8 @@ function renderSalarySlipCard(t, month){
       <p class="text-xs text-gray-500">This slip is computer-generated and valid without signature.</p>
     </div>
     <div class="doc-footer">
-      <span class="lead">Learn Today</span>
-      <span class="lead2">Lead Tomorrow</span>
+      <span class="lead">${esc(tag1())}</span>
+      <span class="lead2">${esc(tag2())}</span>
     </div>
   </div>`;
 }
@@ -2799,7 +2851,7 @@ function hmSalary(){
       <p class="text-xs text-gray-500 mb-3">Running total since each teacher's join date: Billed = every month's salary, Paid = what has actually been paid, Due = Billed − Paid.</p>
       <div class="overflow-x-auto">
       <table class="w-full text-sm">
-        <thead><tr class="text-left border-b"><th class="py-2">Name</th><th>Subject</th><th>Total Billed</th><th>Total Paid</th><th>Total Due</th><th>Status</th></tr></thead>
+        <thead><tr class="text-left border-b"><th class="py-2">Name</th><th>Subject</th><th>Total Billed</th><th>Total Paid</th><th>Total Due</th><th>Status</th><th>Combined voucher</th></tr></thead>
         <tbody>${duesRows}</tbody>
       </table>
       </div>
@@ -2843,7 +2895,9 @@ function renderTeacherSalary(t){
 function hmFees(){
   const cls = document.getElementById('feeClassSel')?.value || DB.config.classes[0];
   const month = document.getElementById('feeMonthSel')?.value || currentMonthKey();
-  const students = DB.students.filter(s=>s.cls===cls);
+  const allInClass = DB.students.filter(s=>s.cls===cls);
+  const students = allInClass.filter(s=>feeApplies(s, month));      // only students already admitted by this month
+  const notYet = allInClass.length - students.length;
   let tBill=0, tPaid=0, nFull=0, nPart=0, nNone=0;
   const rows = students.map(s=>{
     const rec = recSync(ensureFeeRecord(s.id, month, s.cls));
@@ -2862,7 +2916,7 @@ function hmFees(){
       <td><button onclick="viewFeeVoucher('${s.id}','${month}')" class="text-[var(--navy)] text-sm font-bold">🧾 Voucher</button></td>
     </tr>`;
   }).join('') || `<tr><td colspan="8" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
-  const duesRows = students.map(s=>{
+  const duesRows = allInClass.map(s=>{
     const sum = feeSummary(s);
     const badge = sum.unpaidCount>=3 ? `<span class="ann-badge bg-red-100 text-red-700">⚠️ ${sum.unpaidCount} months overdue</span>`
                 : sum.unpaidCount>=1 ? `<span class="ann-badge bg-amber-100 text-amber-700">${sum.unpaidCount} month${sum.unpaidCount>1?'s':''} due</span>`
@@ -2873,8 +2927,9 @@ function hmFees(){
       <td class="text-green-700 font-bold">${rs(sum.totalPaid)}</td>
       <td class="${sum.totalDue>0?'text-red-600':'text-gray-400'} font-bold">${rs(sum.totalDue)}</td>
       <td>${badge}</td>
+      <td class="whitespace-nowrap"><button onclick="openCombinedFee('${s.id}',true)" class="text-[var(--navy)] text-sm font-bold">📑 Combined</button></td>
     </tr>`;
-  }).join('') || `<tr><td colspan="6" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
+  }).join('') || `<tr><td colspan="7" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
   saveDB();
   return `
   <div class="space-y-5">
@@ -2899,6 +2954,7 @@ function hmFees(){
         <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Remaining</div><div class="text-lg font-bold ${tBill-tPaid>0?'text-red-600':'text-green-600'}">${rs(tBill-tPaid)}</div></div>
         <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Students</div><div class="text-xs font-bold mt-1">${nFull} paid · ${nPart} partly · ${nNone} unpaid</div></div>
       </div>
+      ${notYet?`<p class="text-xs text-amber-700 mb-2">ℹ️ ${notYet} student${notYet>1?'s':''} of this class ${notYet>1?'were':'was'} admitted after ${monthLabel(month)}, so ${notYet>1?'they are':'they\'re'} not listed for this month.</p>`:''}
       <div class="overflow-x-auto">
       <table class="w-full text-sm">
         <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>Fee</th><th>Received</th><th>Balance</th><th>Status</th><th>Quick</th><th>Voucher</th></tr></thead>
@@ -2919,6 +2975,88 @@ function hmFees(){
     <div id="feeVoucherPreview"></div>
   </div>`;
 }
+/* ---- Combined voucher: pick several (previous) months and get ONE voucher listing all of them. ---- */
+function dueMonthsOf(stu){
+  return monthsRange(feeStartMonth(stu)+'-01', currentMonthKey()).filter(mo=>recBalance(recSync(ensureFeeRecord(stu.id, mo, stu.cls)))>0);
+}
+function openCombinedFee(studentId, canReceive){
+  const box = document.getElementById('feeVoucherPreview'); if(!box) return;
+  const stu = DB.students.find(s=>s.id===studentId); if(!stu) return;
+  const months = dueMonthsOf(stu);
+  if(!months.length){ box.innerHTML = card(`<p class="text-green-700 font-bold">✅ ${esc(stu.name)} has no unpaid months — nothing to combine.</p>`); return; }
+  const rows = months.map(mo=>{ const r=DB.fees[stu.id][mo];
+    return `<tr class="border-b"><td class="py-2"><input type="checkbox" class="cfMonth w-5 h-5" data-m="${mo}" data-bal="${recBalance(r)}" checked onchange="cfRecalc()"></td><td>${monthLabel(mo)}</td><td>${rs(recAmount(r))}</td><td class="text-green-700">${rs(recPaid(r))}</td><td class="text-red-600 font-bold">${rs(recBalance(r))}</td></tr>`; }).join('');
+  const total = months.reduce((t,mo)=>t+recBalance(DB.fees[stu.id][mo]),0);
+  box.innerHTML = card(`
+    <h2 class="text-lg font-bold text-[var(--navy)] mb-1">📑 Combined Fee Voucher — ${esc(stu.name)} (Class ${esc(stu.cls)})</h2>
+    <p class="text-xs text-gray-500 mb-3">Tick the months to combine. ${canReceive?'Enter what the parent is paying now — it is applied to the oldest selected month first — and one voucher with the full record is made.':'One voucher with the full record of the selected months.'}</p>
+    <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2"></th><th>Month</th><th>Fee</th><th>Paid</th><th>Balance</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="flex flex-wrap items-end gap-3 mt-3">
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Selected balance</div><div id="cfTotal" class="text-lg font-bold text-red-600">${rs(total)}</div></div>
+      ${canReceive?`<div><label class="block text-xs font-bold mb-1">Received now (Rs.)</label><input id="cfAmt" type="number" min="0" value="${total}" class="border rounded-lg px-3 py-2 w-36"></div>
+      <button onclick="cfIssue('${stu.id}',true)" class="gold-btn rounded-lg px-4 py-2 font-bold">💵 Receive &amp; make voucher</button>`:''}
+      <button onclick="cfIssue('${stu.id}',false)" class="navy-btn rounded-lg px-4 py-2 font-bold">🧾 ${canReceive?'Voucher only (no payment)':'Make voucher'}</button>
+    </div>
+    <div id="combinedVoucherOut" class="mt-4"></div>`);
+}
+function cfRecalc(){
+  const t=[...document.querySelectorAll('.cfMonth')].filter(c=>c.checked).reduce((a,c)=>a+Number(c.dataset.bal||0),0);
+  const e=document.getElementById('cfTotal'); if(e) e.textContent=rs(t);
+  const a=document.getElementById('cfAmt'); if(a) a.value=t;
+}
+function cfIssue(studentId, receive){
+  const stu = DB.students.find(s=>s.id===studentId); if(!stu) return;
+  const months = [...document.querySelectorAll('.cfMonth')].filter(c=>c.checked).map(c=>c.dataset.m).sort();
+  if(!months.length){ alert('Tick at least one month.'); return; }
+  const before = months.map(mo=>({mo, fee:recAmount(DB.fees[stu.id][mo]), paid:recPaid(DB.fees[stu.id][mo]), now:0}));
+  let received = 0;
+  if(receive){
+    const total = before.reduce((t,r)=>t+(r.fee-r.paid),0);
+    let amt = Math.max(0, Number((document.getElementById('cfAmt')||{}).value)||0);
+    if(amt>total){ alert(`That is more than the selected balance (${rs(total)}) — only ${rs(total)} will be applied.`); amt=total; }
+    received = amt;
+    let left = amt;
+    before.forEach(r=>{ const pay=Math.min(left, r.fee-r.paid); if(pay>0){ const rec=DB.fees[stu.id][r.mo]; rec.paid=recPaid(rec)+pay; rec.paidOn=todayISO(); recSync(rec); r.now=pay; left-=pay; } });
+    saveDB();
+  }
+  const html = `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('combinedVoucherCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('combinedVoucherCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` + renderCombinedVoucherCard(stu, before, received);
+  if(receive){ render(); const box=document.getElementById('feeVoucherPreview'); if(box) box.innerHTML = html; }
+  else { const out=document.getElementById('combinedVoucherOut'); if(out) out.innerHTML = html; }
+  setTimeout(()=>{ const e=document.getElementById('combinedVoucherCard'); if(e) e.scrollIntoView({behavior:'smooth',block:'start'}); },60);
+}
+function renderCombinedVoucherCard(stu, rows, receivedNow){
+  const cfg = DB.config;
+  const tFee=rows.reduce((t,r)=>t+r.fee,0), tPaidBefore=rows.reduce((t,r)=>t+r.paid,0), tNow=rows.reduce((t,r)=>t+r.now,0);
+  const tBal = tFee-tPaidBefore-tNow;
+  return `
+  <div class="doc-frame max-w-xl mx-auto" id="combinedVoucherCard" data-fname="${esc(stu.name)}-combined-fee-voucher">
+    <div class="doc-topbar"></div>
+    <div class="doc-arc">
+      <div class="doc-shield">${cfg.logo?`<img src="${cfg.logo}" class="w-full h-full object-cover rounded-lg">`:'🎓'}</div>
+      <div class="doc-title">${esc(cfg.schoolName.split(' ').slice(0,2).join(' '))}</div>
+      <div class="doc-subtitle">${esc(cfg.schoolName.split(' ').slice(2).join(' '))}</div>
+      <div class="doc-badge">★ COMBINED FEE VOUCHER ★</div>
+    </div>
+    <div class="p-5 space-y-4">
+      <div class="ms-info-box grid grid-cols-2 gap-2">
+        <div><b>Student:</b> ${esc(stu.name)}</div><div><b>Roll No:</b> ${esc(stu.roll)}</div>
+        <div><b>Class:</b> ${esc(stu.cls)}</div><div><b>Father:</b> ${esc(stu.father||'-')}</div>
+        <div><b>Months:</b> ${rows.length} (${monthLabel(rows[0].mo)}${rows.length>1?' – '+monthLabel(rows[rows.length-1].mo):''})</div><div><b>Issued:</b> ${todayISO()}</div>
+      </div>
+      <table class="ms-table"><thead><tr><th style="text-align:left">Month</th><th>Fee</th><th>Paid earlier</th>${tNow>0?'<th>Paid now</th>':''}<th>Balance</th></tr></thead><tbody>
+        ${rows.map(r=>`<tr><td style="text-align:left">${monthLabel(r.mo)}</td><td>${rs(r.fee)}</td><td>${rs(r.paid)}</td>${tNow>0?`<td style="color:#16a34a;font-weight:700">${rs(r.now)}</td>`:''}<td style="font-weight:700;color:${r.fee-r.paid-r.now>0?'#dc2626':'#16a34a'}">${rs(r.fee-r.paid-r.now)}</td></tr>`).join('')}
+      </tbody></table>
+      <div class="ms-summary-box">
+        <div class="row"><span>Total fee (selected months)</span><span>${rs(tFee)}</span></div>
+        <div class="row"><span>Already paid</span><span class="text-green-600">${rs(tPaidBefore)}</span></div>
+        ${tNow>0?`<div class="row"><span>Received today</span><span class="text-green-600">${rs(tNow)}</span></div>`:''}
+        <div class="row" style="border-bottom:none;font-size:1rem;"><span>${tBal>0?'Total Balance Payable':'Balance'}</span><span>${rs(tBal)}</span></div>
+      </div>
+      <p class="text-xs text-gray-500">${tBal<=0?'All selected months are cleared. ':''}This voucher is computer-generated and valid without signature.</p>
+    </div>
+    <div class="doc-footer"><span class="lead">${esc(tag1())}</span><span class="lead2">${esc(tag2())}</span></div>
+  </div>`;
+}
 function viewFeeVoucher(studentId, month){
   const box = document.getElementById('feeVoucherPreview'); if(!box) return;
   const stu = DB.students.find(s=>s.id===studentId); if(!stu) return;
@@ -2927,7 +3065,7 @@ function viewFeeVoucher(studentId, month){
 function renderParentFees(stu){
   const sum = feeSummary(stu);
   saveDB();
-  const months = Object.keys(DB.fees[stu.id]||{}).sort().reverse();
+  const months = Object.keys(DB.fees[stu.id]||{}).filter(m=>feeApplies(stu,m)).sort().reverse();
   const rows = months.map(m=>{
     const rec = recSync(DB.fees[stu.id][m]);
     return `<tr class="border-b"><td class="py-2">${monthLabel(m)}</td><td>${rs(recAmount(rec))}</td><td class="text-green-700">${rs(recPaid(rec))}</td><td class="${recBalance(rec)>0?'text-red-600 font-bold':'text-gray-400'}">${rs(recBalance(rec))}</td>
@@ -2942,6 +3080,7 @@ function renderParentFees(stu){
       <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Due</div><div class="text-xl font-bold ${sum.totalDue>0?'text-red-600':'text-green-600'}">${rs(sum.totalDue)}</div></div>
       <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Status</div><div class="text-sm font-bold mt-1">${sum.unpaidCount>=3?`⚠️ ${sum.unpaidCount} months overdue`:sum.unpaidCount>=1?`${sum.unpaidCount} month${sum.unpaidCount>1?'s':''} due`:'✅ Up to date'}</div></div>
     </div>
+    ${sum.unpaidCount>1?`<button onclick="openCombinedFee('${stu.id}',false)" class="gold-btn rounded-lg px-4 py-2 text-sm font-bold mb-3">📑 Combined voucher for ${sum.unpaidCount} unpaid months</button>`:''}
     <h3 class="font-bold text-[var(--navy)] mb-2">Month-by-Month</h3>
     <div class="overflow-x-auto">
     <table class="w-full text-sm">
@@ -3046,7 +3185,7 @@ function renderIdCard(person, role){
         ${rowsHtml}
       </div>
       <div style="background:var(--navy);padding:0.9mm 2.6mm;display:flex;justify-content:space-between;font-family:'Brush Script MT',cursive;font-size:7pt;">
-        <span style="color:#fff;">Learn Today</span><span style="color:var(--gold-light);">Lead Tomorrow</span>
+        <span style="color:#fff;">${esc(tag1())}</span><span style="color:var(--gold-light);">${esc(tag2())}</span>
       </div>
     </div>
   </div>`;
@@ -3192,7 +3331,7 @@ function certPctFor(p){ return p.finalPct!=null ? Number(p.finalPct) : studentOv
    (feeSummary() would otherwise keep inventing new unpaid months after they left). */
 function certDues(p){
   if(p.passedOutOn){
-    return Object.values(DB.fees[p.id]||{}).reduce((t,r)=>t+recBalance(r),0);
+    return Object.entries(DB.fees[p.id]||{}).reduce((t,[mo,r])=>t+(feeApplies(p,mo)?recBalance(r):0),0);
   }
   return feeSummary(p).totalDue;
 }
@@ -3226,7 +3365,7 @@ function renderCertificateCard(rec){
       <div style="text-align:center;">
         <div style="width:70px;height:70px;margin:0 auto 8px;border:3px solid var(--gold);border-radius:50%;background:var(--navy);display:flex;align-items:center;justify-content:center;overflow:hidden;color:var(--gold-light);font-size:28px;">${cfg.logo?`<img src="${cfg.logo}" style="width:100%;height:100%;object-fit:cover;">`:'🎓'}</div>
         <div style="font-family:Georgia,serif;color:var(--navy);font-size:1.45rem;font-weight:700;letter-spacing:3px;text-transform:uppercase;">${esc(cfg.schoolName)}</div>
-        <div style="font-family:'Trebuchet MS',sans-serif;color:var(--gold);font-size:.72rem;letter-spacing:4px;margin-top:3px;font-weight:700;">LEARN TODAY · LEAD TOMORROW</div>
+        <div style="font-family:'Trebuchet MS',sans-serif;color:var(--gold);font-size:.72rem;letter-spacing:4px;margin-top:3px;font-weight:700;">${esc((tag1()+' · '+tag2()).toUpperCase())}</div>
       </div>
       <div style="text-align:center;margin-top:10px;">
         <div style="font-family:Georgia,serif;color:var(--navy);font-size:2.7rem;font-weight:700;letter-spacing:8px;line-height:1.1;">CERTIFICATE</div>
