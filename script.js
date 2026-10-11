@@ -711,7 +711,7 @@ function driveAutoSave(){
    "anyone with the link: viewer" and read with the public key. The result is remembered so the login screen can say
    plainly when the data could not be loaded, instead of silently showing an empty school. */
 let DRIVE_LOAD = {ok:null, err:''};
-const BUILD_TAG='v7';
+const BUILD_TAG='v8';
 function driveParentPull(silent){
   if(!DRIVE_FILE_ID) return Promise.resolve();
   if(!navigator.onLine){ DRIVE_LOAD={ok:false, err:'No internet connection on this device'}; if(!silent) render(); return Promise.resolve(); }
@@ -1848,6 +1848,7 @@ function hmTeachers(){
       <td class="text-xs">${esc(t.gmail||'—')}</td>
       <td>${accessBadge}</td>
       <td class="whitespace-nowrap">
+        <button onclick="editTeacher('${t.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">✏️ Edit</button>
         <button onclick="resetTeacherPass('${t.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">🔑 Password</button>
         <button onclick="editTeacherSalaryInfo('${t.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">🧾 Join/Salary</button>
         ${t.drivePermissionId
@@ -1898,6 +1899,27 @@ function addTeacher(){
     reader.onload = e=>finish(e.target.result);
     reader.readAsDataURL(photoInput.files[0]);
   } else finish(null);
+}
+function editTeacher(id){
+  const t = DB.teachers.find(x=>x.id===id); if(!t) return;
+  const name = prompt('Teacher name:', t.name); if(name===null) return;
+  const subject = prompt('Subject:', t.subject); if(subject===null) return;
+  const cls = prompt('Class (one of: '+DB.config.classes.join(', ')+'):', t.cls); if(cls===null) return;
+  if(!DB.config.classes.includes(cls.trim())){ alert('That class does not exist. Use exactly one of: '+DB.config.classes.join(', ')); return; }
+  const gmail = prompt('Gmail (for Drive access):', t.gmail||''); if(gmail===null) return;
+  const gChanged = (gmail.trim().toLowerCase() !== (t.gmail||'').trim().toLowerCase());
+  const oldPerm = t.drivePermissionId;
+  t.name=name.trim()||t.name; t.subject=subject.trim()||t.subject; t.cls=cls.trim(); t.gmail=gmail.trim();
+  if(gChanged && oldPerm){
+    t.drivePermissionId=null; saveDB(); render();
+    if(driveAccessToken && DRIVE_FILE_ID){
+      fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}/permissions/${oldPerm}`,{method:'DELETE',headers:{Authorization:'Bearer '+driveAccessToken}}).catch(()=>{})
+        .finally(()=>{ if(t.gmail) driveGrantTeacherAccess(t.id); });
+    } else alert('Gmail changed. The old Gmail still has Drive access until you connect Drive and press Revoke/Grant for this teacher.');
+    return;
+  }
+  saveDB(); render();
+  if(gChanged && t.gmail && driveAccessToken) driveGrantTeacherAccess(t.id);
 }
 function delTeacher(id){ if(confirm('Remove this teacher?')){ DB.teachers = DB.teachers.filter(t=>t.id!==id); saveDB(); render(); } }
 function editTeacherSalaryInfo(id){
@@ -2356,6 +2378,15 @@ const T_TABS = [
   {key:'staff', label:'Staff', icon:'👥'},
   {key:'backup', label:'Backup', icon:'💾'},
 ];
+function teacherSyncBanner(){
+  if(!DRIVE_FILE_ID) return '';
+  if(driveLinked() && !DRIVE_NEEDS_ACCESS) return '';
+  const needsAccess = driveLinked() && DRIVE_NEEDS_ACCESS;
+  return `<div class="rounded-xl border border-amber-300 bg-amber-50 p-3 mb-4 text-sm text-amber-900 no-print">
+    <b>${needsAccess?'⚠️ One more step to send your work to the Headmaster':'⚠️ Your work is saved only on this phone right now'}</b>
+    <div class="text-xs mt-1">${needsAccess?'Tap the button and choose the school file once.':'Connect your Google account (the Gmail the Headmaster added for you) so everything you add reaches the Headmaster and the school.'}</div>
+    <button onclick="${needsAccess?'driveOfferPicker()':'driveConnect()'}" class="mt-2 navy-btn rounded-lg px-4 py-2 font-bold">${needsAccess?'🔓 Allow access to school file':'🔗 Connect Google Drive'}</button></div>`;
+}
 function renderTeacher(){
   const teacher = DB.teachers.find(t=>t.id===SESSION.teacherId);
   if(!teacher){ logout(); return; }
@@ -2372,6 +2403,7 @@ function renderTeacher(){
   if(ACTIVE_TAB==='idcard') content = tIdCard(teacher);
   if(ACTIVE_TAB==='staff') content = renderStaffDirectory();
   if(ACTIVE_TAB==='backup') content = tBackup(teacher);
+  content = teacherSyncBanner()+content;
   document.getElementById('app').innerHTML = shell(`Teacher — ${esc(teacher.name)} (${esc(teacher.cls)})`, T_TABS, ACTIVE_TAB, content);
 }
 function tBackup(teacher){
@@ -3706,3 +3738,13 @@ Promise.race([Promise.all([driveParentPull(true), refreshApprovalStatus()]), new
 if('serviceWorker' in navigator && /^https?:$/.test(location.protocol)){
   window.addEventListener('load', ()=>{ navigator.serviceWorker.register('sw.js').catch(()=>{}); });
 }
+/* Keep the open tab centred in the sliding tab bar so the previous and next tabs stay visible */
+function centerActiveTab(){
+  try{
+    const a=document.querySelector('.side-link.active'); if(!a) return;
+    const bar=a.parentElement; if(!bar || bar.scrollWidth<=bar.clientWidth) return;
+    const left=a.offsetLeft - (bar.clientWidth-a.offsetWidth)/2;
+    bar.scrollLeft=Math.max(0,left);
+  }catch(e){}
+}
+(function(){ const _r=render; render=function(){ _r.apply(this,arguments); centerActiveTab(); }; })();
