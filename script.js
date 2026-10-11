@@ -711,21 +711,34 @@ function driveAutoSave(){
    "anyone with the link: viewer" and read with the public key. The result is remembered so the login screen can say
    plainly when the data could not be loaded, instead of silently showing an empty school. */
 let DRIVE_LOAD = {ok:null, err:''};
+const BUILD_TAG='v6';
 function driveParentPull(silent){
-  if(!DRIVE_FILE_ID || !navigator.onLine || hasPending()) return Promise.resolve();
+  if(!DRIVE_FILE_ID) return Promise.resolve();
+  if(!navigator.onLine){ DRIVE_LOAD={ok:false, err:'No internet connection on this device'}; if(!silent) render(); return Promise.resolve(); }
+  if(hasPending()) return Promise.resolve();
+  const done=()=>{ if(!SESSION || !silent){ try{ render(); }catch(e){} } };
   return fetchDriveJson(DRIVE_FILE_ID)
     .then(data=>{
-      DRIVE_LOAD = {ok:true, err:''};
+      DRIVE_LOAD = {ok:true, err:'', at:new Date(), students:(data.students||[]).length, teachers:(data.teachers||[]).length};
       if(hasPending()) return;
       DB = Object.assign(defaultDB(), data, {config:Object.assign(defaultDB().config, data.config||{})});
       const j=JSON.stringify(DB); localStorage.setItem(DB_KEY, j); if(driveLinked()||syncedHash()) markSynced(j);
-      applyTheme(DB.config.theme); driveLastSync=new Date(); if(!silent) render();
+      applyTheme(DB.config.theme); driveLastSync=new Date(); done();
     })
-    .catch(e=>{ DRIVE_LOAD = {ok:false, err:(e&&e.message)||'network error'}; if(!silent) render(); });
+    .catch(e=>{ DRIVE_LOAD = {ok:false, err:(e&&e.message)||'network error'}; done(); });
+}
+function loadStatusHtml(){
+  if(!DRIVE_FILE_ID) return '';
+  if(DRIVE_LOAD.ok===true) return `<div class="text-[11px] text-green-700 mb-3">✅ School data loaded${DRIVE_LOAD.teachers!=null?` · ${DRIVE_LOAD.teachers} teacher(s), ${DRIVE_LOAD.students} student(s)`:''}</div>`;
+  if(DRIVE_LOAD.ok===false) return loadFailHtml();
+  return `<div class="text-[11px] text-gray-500 mb-3">⏳ Loading school data…</div>`;
 }
 function loadFailHtml(){
+  const keyBlocked = /api-key: HTTP 40[13]/.test(DRIVE_LOAD.err||'');
   return `<div class="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 mb-4">
-    <b>⚠️ This school's data could not be loaded.</b> Check your internet and try again. If it keeps failing, ask the Headmaster to open <b>Cloud Sync</b> once (it makes the school file readable for parents and teachers).
+    <b>⚠️ This school's data could not be loaded.</b> ${keyBlocked
+      ? `Google refused the request. The school file is not shared publicly yet, or the API key does not allow <b>${esc(location.origin)}</b>. Ask the Headmaster to open <b>Cloud Sync</b> (it makes the file readable) and the site owner to add <b>${esc(location.origin)}/*</b> to the API key's website restrictions.`
+      : `Check your internet and try again. If it keeps failing, ask the Headmaster to open <b>Cloud Sync</b> once (it makes the school file readable for parents and teachers).`}
     <div class="mt-1 text-[11px] opacity-80 break-all">Detail: ${esc(DRIVE_LOAD.err||'unknown')}</div>
     <button onclick="retryLoadSchool()" class="mt-2 navy-btn rounded-lg px-4 py-1.5 font-bold">🔄 Try again</button></div>`;
 }
@@ -1358,11 +1371,11 @@ function renderLogin(){
               <button data-role="${r}" class="role-tab flex-1 py-2 ${i===0?'tab-btn active':''} bg-gray-50" onclick="selectRole('${r}')">${r[0].toUpperCase()+r.slice(1)}</button>
             `).join('')}
           </div>
-          ${(DRIVE_FILE_ID && DRIVE_LOAD.ok===false)?loadFailHtml():''}
+          ${loadStatusHtml()}
           <div id="loginFields"></div>
           <div id="loginError" class="text-red-600 text-sm mt-2 hidden"></div>
           <button onclick="doLogin()" class="w-full navy-btn rounded-lg py-2.5 mt-4 font-bold">Login</button>
-          <p class="text-center text-xs text-gray-400 mt-3"><a href="privacy-policy.html" target="_blank" class="underline">Privacy Policy</a> · <a href="terms-of-service.html" target="_blank" class="underline">Terms of Service</a></p>
+          <p class="text-center text-xs text-gray-400 mt-3"><a href="privacy-policy.html" target="_blank" class="underline">Privacy Policy</a> · <a href="terms-of-service.html" target="_blank" class="underline">Terms of Service</a> · <span>${BUILD_TAG}</span></p>
         </div>
         <div class="doc-footer">
           <span class="lead">${esc(tag1())}</span>
