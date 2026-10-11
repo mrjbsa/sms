@@ -9,8 +9,61 @@
   "background_color": "#0b1a4a",
   "theme_color": "#0b1a4a",
   "icons": [
-    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
-    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
-    {"src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "id": "./index.html",
+  "lang": "en",
+  "categories": [
+    "education",
+    "productivity",
+    "business"
+  ],
+  "prefer_related_applications": false,
+  "screenshots": [
+    {
+      "src": "screenshots/shot-1.png",
+      "sizes": "1600x790",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Dashboard with finances and attendance"
+    },
+    {
+      "src": "screenshots/shot-2.png",
+      "sizes": "1600x790",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Marks overview and marksheet"
+    },
+    {
+      "src": "screenshots/shot-3.png",
+      "sizes": "1600x790",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Fee collection and dues summary"
+    },
+    {
+      "src": "screenshots/shot-4.png",
+      "sizes": "1600x790",
+      "type": "image/png",
+      "form_factor": "wide",
+      "label": "Professional ID cards"
+    }
   ]
 }
