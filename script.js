@@ -287,7 +287,7 @@ function fetchDriveJson(id){
     if(i>=routes.length) return Promise.reject(new Error(errs.join(' | ')));
     const [name,run]=routes[i];
     return run().then(r=>{
-      if(!r.ok) throw new Error('HTTP '+r.status);
+      if(!r.ok) return r.text().then(b=>{ let why=''; try{ const j=JSON.parse(b); const e0=(j.error&&j.error.errors&&j.error.errors[0])||{}; const det=(j.error&&j.error.details||[]).map(d=>d.reason).filter(Boolean)[0]; why=det||e0.reason||(j.error&&j.error.status)||''; }catch(x){} throw new Error('HTTP '+r.status+(why?' ('+why+')':'')); });
       return r.text().then(t=>{ const j=JSON.parse(t); if(!j||typeof j!=='object') throw new Error('not JSON'); return j; });
     }).catch(e=>{ errs.push(name+': '+((e&&e.message)||'failed')); return next(i+1); });
   };
@@ -711,7 +711,7 @@ function driveAutoSave(){
    "anyone with the link: viewer" and read with the public key. The result is remembered so the login screen can say
    plainly when the data could not be loaded, instead of silently showing an empty school. */
 let DRIVE_LOAD = {ok:null, err:''};
-const BUILD_TAG='v6';
+const BUILD_TAG='v7';
 function driveParentPull(silent){
   if(!DRIVE_FILE_ID) return Promise.resolve();
   if(!navigator.onLine){ DRIVE_LOAD={ok:false, err:'No internet connection on this device'}; if(!silent) render(); return Promise.resolve(); }
@@ -727,6 +727,15 @@ function driveParentPull(silent){
     })
     .catch(e=>{ DRIVE_LOAD = {ok:false, err:(e&&e.message)||'network error'}; done(); });
 }
+function testParentAccess(){
+  const out=document.getElementById('parentTestOut'); if(!out) return;
+  out.innerHTML='Testing exactly like a parent\'s phone (no sign-in)…';
+  fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`).then(r=>r.ok?r.json().then(j=>{ out.innerHTML=`<span class="text-green-700 font-bold">✅ Works. Parents/teachers can load this school (${(j.teachers||[]).length} teachers, ${(j.students||[]).length} students).</span>`; }):r.text().then(b=>{
+    let why=''; try{ const j=JSON.parse(b); why=((j.error.details||[]).map(d=>d.reason).filter(Boolean)[0])||(j.error.errors&&j.error.errors[0].reason)||''; }catch(e){}
+    const ref=/REFERRER/i.test(why);
+    out.innerHTML=`<span class="text-red-700 font-bold">❌ Blocked (HTTP ${r.status}${why?', '+esc(why):''}).</span> `+(ref?`The API key does not allow <b>${esc(location.origin)}/*</b> — add it under API key → Website restrictions in Google Cloud Console, wait 5 minutes, test again.`:`The file is not public. Press <b>Enable Parent Viewing</b>, then test again.`);
+  })).catch(e=>{ out.innerHTML='<span class="text-red-700 font-bold">❌ Network error: '+esc(e.message)+'</span>'; });
+}
 function loadStatusHtml(){
   if(!DRIVE_FILE_ID) return '';
   if(DRIVE_LOAD.ok===true) return `<div class="text-[11px] text-green-700 mb-3">✅ School data loaded${DRIVE_LOAD.teachers!=null?` · ${DRIVE_LOAD.teachers} teacher(s), ${DRIVE_LOAD.students} student(s)`:''}</div>`;
@@ -734,9 +743,13 @@ function loadStatusHtml(){
   return `<div class="text-[11px] text-gray-500 mb-3">⏳ Loading school data…</div>`;
 }
 function loadFailHtml(){
-  const keyBlocked = /api-key: HTTP 40[13]/.test(DRIVE_LOAD.err||'');
+  const keyBlocked = /api-key: HTTP 40[13]/.test(DRIVE_LOAD.err||''); const refBlocked = /REFERRER_BLOCKED|referer|referrer/i.test(DRIVE_LOAD.err||''); const notShared = /notFound|forbidden|cannotDownload|PERMISSION/i.test(DRIVE_LOAD.err||'') && !refBlocked;
   return `<div class="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 mb-4">
-    <b>⚠️ This school's data could not be loaded.</b> ${keyBlocked
+    <b>⚠️ This school's data could not be loaded.</b> ${refBlocked
+      ? `The API key does not allow this website. The site owner must add <b>${esc(location.origin)}/*</b> to the API key's <i>Website restrictions</i> in Google Cloud Console (then wait ~5 minutes).`
+      : notShared
+      ? `The school file is not shared publicly yet. The Headmaster must log in on the NEW version, open <b>Cloud Sync</b> and press <b>Enable Parent Viewing</b>.`
+      : keyBlocked
       ? `Google refused the request. The school file is not shared publicly yet, or the API key does not allow <b>${esc(location.origin)}</b>. Ask the Headmaster to open <b>Cloud Sync</b> (it makes the file readable) and the site owner to add <b>${esc(location.origin)}/*</b> to the API key's website restrictions.`
       : `Check your internet and try again. If it keeps failing, ask the Headmaster to open <b>Cloud Sync</b> once (it makes the school file readable for parents and teachers).`}
     <div class="mt-1 text-[11px] opacity-80 break-all">Detail: ${esc(DRIVE_LOAD.err||'unknown')}</div>
@@ -820,6 +833,7 @@ function renderCloudSyncPanel(){
       <button onclick="driveSaveNow(false)" class="gold-btn rounded-lg px-5 py-2 font-bold">⬆️ Save Now</button>
       <button onclick="drivePullNow(false)" class="bg-gray-200 rounded-lg px-5 py-2 font-bold">⬇️ Load Latest</button>
       ${DRIVE_FILE_ID?`<button onclick="driveMakePublicReadable()" class="bg-purple-600 text-white rounded-lg px-5 py-2 font-bold">👀 Enable Parent Viewing</button>`:''}
+      ${DRIVE_FILE_ID?`<button onclick="testParentAccess()" class="bg-green-700 text-white rounded-lg px-5 py-2 font-bold ml-2">🧪 Test teacher/parent link</button><div id="parentTestOut" class="text-xs mt-2"></div>`:''}
     </div>
     <p class="text-xs text-gray-500 mt-3">Once connected, every change auto-uploads to Google Drive within a couple of seconds. No internet? Keep working — everything is saved on this device and uploads by itself as soon as the internet is back.</p>
     ${DRIVE_FILE_ID?`
