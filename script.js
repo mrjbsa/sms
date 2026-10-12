@@ -278,6 +278,7 @@ function fetchDriveJson(id){
   const base = `https://www.googleapis.com/drive/v3/files/${id}?alt=media`;
   const tok = (typeof driveAccessToken!=='undefined' && driveAccessToken) ? {Authorization:'Bearer '+driveAccessToken} : null;
   const routes = [
+    ['server', ()=>fetch('/api/drive?id='+encodeURIComponent(id))],
     tok && ['sign-in token', ()=>fetch(base,{headers:tok})],
     ['api-key', ()=>fetch(`${base}&key=${GOOGLE_API_KEY}`)],
     tok && ['token+key', ()=>fetch(`${base}&key=${GOOGLE_API_KEY}`,{headers:tok})],
@@ -711,7 +712,7 @@ function driveAutoSave(){
    "anyone with the link: viewer" and read with the public key. The result is remembered so the login screen can say
    plainly when the data could not be loaded, instead of silently showing an empty school. */
 let DRIVE_LOAD = {ok:null, err:''};
-const BUILD_TAG='v8';
+const BUILD_TAG='v10';
 function driveParentPull(silent){
   if(!DRIVE_FILE_ID) return Promise.resolve();
   if(!navigator.onLine){ DRIVE_LOAD={ok:false, err:'No internet connection on this device'}; if(!silent) render(); return Promise.resolve(); }
@@ -730,7 +731,7 @@ function driveParentPull(silent){
 function testParentAccess(){
   const out=document.getElementById('parentTestOut'); if(!out) return;
   out.innerHTML='Testing exactly like a parent\'s phone (no sign-in)…';
-  fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`).then(r=>r.ok?r.json().then(j=>{ out.innerHTML=`<span class="text-green-700 font-bold">✅ Works. Parents/teachers can load this school (${(j.teachers||[]).length} teachers, ${(j.students||[]).length} students).</span>`; }):r.text().then(b=>{
+  fetch('/api/drive?id='+encodeURIComponent(DRIVE_FILE_ID)).then(r=>r.ok?r:fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`)).catch(()=>fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}?alt=media&key=${GOOGLE_API_KEY}`)).then(r=>r.ok?r.json().then(j=>{ out.innerHTML=`<span class="text-green-700 font-bold">✅ Works. Parents/teachers can load this school (${(j.teachers||[]).length} teachers, ${(j.students||[]).length} students).</span>`; }):r.text().then(b=>{
     let why=''; try{ const j=JSON.parse(b); why=((j.error.details||[]).map(d=>d.reason).filter(Boolean)[0])||(j.error.errors&&j.error.errors[0].reason)||''; }catch(e){}
     const ref=/REFERRER/i.test(why);
     out.innerHTML=`<span class="text-red-700 font-bold">❌ Blocked (HTTP ${r.status}${why?', '+esc(why):''}).</span> `+(ref?`The API key does not allow <b>${esc(location.origin)}/*</b> — add it under API key → Website restrictions in Google Cloud Console, wait 5 minutes, test again.`:`The file is not public. Press <b>Enable Parent Viewing</b>, then test again.`);

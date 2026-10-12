@@ -2,7 +2,7 @@
    - The app files are cached on first visit, so the site opens with NO internet afterwards.
    - Online: always tries the network first (so updates arrive immediately), falls back to the cache when offline.
    - Google sign-in / Drive / API requests are never touched — they go straight to the network. */
-const CACHE_VERSION = 'school-v9';
+const CACHE_VERSION = 'school-v10';
 const CORE = ['./', 'index.html', 'style.css', 'script.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'privacy-policy.html', 'terms-of-service.html'];
 const CDN = ['https://cdn.tailwindcss.com/3.4.17', 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js'];
 
@@ -26,6 +26,7 @@ self.addEventListener('fetch', e=>{
   if(req.method!=='GET') return;
   const url = new URL(req.url);
   if(/(^|\.)googleapis\.com$|(^|\.)google\.com$|(^|\.)gstatic\.com$|googleusercontent\.com$/.test(url.hostname)) return;   // Google: network only
+  if(url.pathname.startsWith('/api/')) return;   // server read-proxy: always live
   const isCdn = CDN.includes(req.url);
   const sameOrigin = url.origin===location.origin;
   if(!sameOrigin && !isCdn) return;
