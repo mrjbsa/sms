@@ -196,7 +196,7 @@ applyTheme(DB.config.theme);
    auto-checks for updates roughly every 25 seconds.
    ============================================================ */
 const GOOGLE_CLIENT_ID = '561937132494-v9ffcqt3ijbr44dpr5jlo0f5b61vm7s4.apps.googleusercontent.com';
-const GOOGLE_API_KEY;
+const GOOGLE_API_KEY=";
 /* A file id arriving via ?fid= in the URL (i.e. someone opened their
    school's shared link) always wins and is remembered on this device. */
 const urlFid = new URLSearchParams(location.search).get('fid');
