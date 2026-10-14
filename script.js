@@ -196,7 +196,7 @@ applyTheme(DB.config.theme);
    auto-checks for updates roughly every 25 seconds.
    ============================================================ */
 const GOOGLE_CLIENT_ID = '561937132494-v9ffcqt3ijbr44dpr5jlo0f5b61vm7s4.apps.googleusercontent.com';
-const GOOGLE_API_KEY= 'AIzaSyCfwHvrZJLTr30ERbiUngugaxcm1Eq4r1g';
+const GOOGLE_API_KEY   = 'AIzaSyCzzco0EgdjcwW9zrZf95slLioXK2cU6Cg';
 /* A file id arriving via ?fid= in the URL (i.e. someone opened their
    school's shared link) always wins and is remembered on this device. */
 const urlFid = new URLSearchParams(location.search).get('fid');
@@ -252,8 +252,10 @@ const PLAN_OPTIONS = [
   {key:'m5',    label:'5 Months',             months:5,  price:8800},
   {key:'m6',    label:'6 Months',             months:6,  price:10500},
   {key:'y1',    label:'1 Year',               months:12, price:18000},
-  {key:'lifetime', label:'Lifetime',          months:null, price:40000},
+  {key:'lifetime', label:'Lifetime',          months:null, price:40000, was:80000},
 ];
+/* Draws a line through the text (works inside <option>, where HTML tags like <s> are not allowed) */
+function strikeText(t){ return String(t).split('').map(c=>c===' '?c:c+'\u0336').join(''); }
 function planByKey(key){ return PLAN_OPTIONS.find(p=>p.key===key) || PLAN_OPTIONS[0]; }
 /* The stored status plus a live expiry check — this is what actually decides
    access, so a plan "auto-denies" the moment its date passes, with nothing
@@ -481,7 +483,7 @@ function renderApprovalGate(){
         <div class="text-left">
           <label class="block text-xs font-bold text-gray-500 mb-1">Plan you'd like</label>
           <select onchange="setRequestedPlan(this.value)" class="w-full border rounded-lg px-3 py-2 text-sm">
-            ${PLAN_OPTIONS.map(p=>`<option value="${p.key}" ${p.key===REQUESTED_PLAN?'selected':''}>${p.label}${p.price?` — Rs. ${p.price}`:''}</option>`).join('')}
+            ${PLAN_OPTIONS.map(p=>`<option value="${p.key}" ${p.key===REQUESTED_PLAN?'selected':''}>${p.label}${p.was?` — ${strikeText('Rs. '+p.was)}  Rs. ${p.price} (50% OFF)`:(p.price?` — Rs. ${p.price}`:'')}</option>`).join('')}
           </select>
         </div>
         <div class="flex flex-col gap-2">
@@ -712,7 +714,7 @@ function driveAutoSave(){
    "anyone with the link: viewer" and read with the public key. The result is remembered so the login screen can say
    plainly when the data could not be loaded, instead of silently showing an empty school. */
 let DRIVE_LOAD = {ok:null, err:''};
-const BUILD_TAG='v10';
+const BUILD_TAG='v12';
 function driveParentPull(silent){
   if(!DRIVE_FILE_ID) return Promise.resolve();
   if(!navigator.onLine){ DRIVE_LOAD={ok:false, err:'No internet connection on this device'}; if(!silent) render(); return Promise.resolve(); }
@@ -746,7 +748,9 @@ function loadStatusHtml(){
 function loadFailHtml(){
   const keyBlocked = /api-key: HTTP 40[13]/.test(DRIVE_LOAD.err||''); const refBlocked = /REFERRER_BLOCKED|referer|referrer/i.test(DRIVE_LOAD.err||''); const notShared = /notFound|forbidden|cannotDownload|PERMISSION/i.test(DRIVE_LOAD.err||'') && !refBlocked;
   return `<div class="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 mb-4">
-    <b>⚠️ This school's data could not be loaded.</b> ${refBlocked
+    <b>⚠️ This school's data could not be loaded.</b> ${/API_KEY_INVALID|API key not valid/i.test(DRIVE_LOAD.err||'')
+      ? `The Google API key inside this website is not valid any more (it was deleted or replaced). The site owner must paste the current key into <b>GOOGLE_API_KEY</b> in script.js and in api/drive.js, then redeploy.`
+      : refBlocked
       ? `The API key does not allow this website. The site owner must add <b>${esc(location.origin)}/*</b> to the API key's <i>Website restrictions</i> in Google Cloud Console (then wait ~5 minutes).`
       : notShared
       ? `The school file is not shared publicly yet. The Headmaster must log in on the NEW version, open <b>Cloud Sync</b> and press <b>Enable Parent Viewing</b>.`
