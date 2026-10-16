@@ -1495,7 +1495,7 @@ function selectRole(role){
         <label class="block text-sm font-bold mb-1">School Name</label>
         <input id="hmNewSchool" type="text" value="${esc(DB.config.schoolName==='My School'?'':DB.config.schoolName)}" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Al-Noor Public School">
         <label class="block text-sm font-bold mb-1">Your Name</label>
-        <input id="hmNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Muhammad Bilal">
+        <input id="hmNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Mr JB">
         <label class="block text-sm font-bold mb-1">Create Password</label>
         <input id="hmNewPass" type="password" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="Choose a password">
         <label class="block text-sm font-bold mb-1">Confirm Password</label>
@@ -4019,7 +4019,7 @@ function ownerLoginFields(){
   if(!ownerAccountExists()){
     return `<p class="text-xs text-gray-500 mb-3">First time here — create the School Owner login. The Owner's Gmail will hold this school's Google Drive data.</p>
       <label class="block text-sm font-bold mb-1">Owner Name</label>
-      <input id="owNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Haji Abdul Rehman">
+      <input id="owNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Mr JB ">
       <label class="block text-sm font-bold mb-1">Create Password</label>
       <input id="owNewPass" type="password" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="Choose a password">
       <label class="block text-sm font-bold mb-1">Confirm Password</label>
