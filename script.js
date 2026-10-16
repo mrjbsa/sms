@@ -200,7 +200,7 @@ applyTheme(DB.config.theme);
    auto-checks for updates roughly every 25 seconds.
    ============================================================ */
 const GOOGLE_CLIENT_ID = '561937132494-v9ffcqt3ijbr44dpr5jlo0f5b61vm7s4.apps.googleusercontent.com';
-const GOOGLE_API_KEY   = 'AIzaSyCzzco0EgdjcwW9zrZf95slLioXK2cU6Cg';
+const GOOGLE_API_KEY   = 'AIzaSyCfwHvrZJLTr30ERbiUngugaxcm1Eq4r1g';
 /* A file id arriving via ?fid= in the URL (i.e. someone opened their
    school's shared link) always wins and is remembered on this device. */
 const urlFid = new URLSearchParams(location.search).get('fid');
@@ -1494,9 +1494,9 @@ function selectRole(role){
     } else if(!hmAccountExists()){
       box.innerHTML = `<p class="text-xs text-gray-500 mb-3">First time here — create your Headmaster login.</p>
         <label class="block text-sm font-bold mb-1">School Name</label>
-        <input id="hmNewSchool" type="text" value="${esc(DB.config.schoolName==='My School'?'':DB.config.schoolName)}" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Al-Noor Public School">
+        <input id="hmNewSchool" type="text" value="${esc(DB.config.schoolName==='My School'?'':DB.config.schoolName)}" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Mr JB Public School">
         <label class="block text-sm font-bold mb-1">Your Name</label>
-        <input id="hmNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Muhammad Bilal">
+        <input id="hmNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Mr JB">
         <label class="block text-sm font-bold mb-1">Create Password</label>
         <input id="hmNewPass" type="password" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="Choose a password">
         <label class="block text-sm font-bold mb-1">Confirm Password</label>
@@ -4026,7 +4026,7 @@ function ownerLoginFields(){
   if(!ownerAccountExists()){
     return `<p class="text-xs text-gray-500 mb-3">First time here — create the School Owner login. The Owner's Gmail will hold this school's Google Drive data.</p>
       <label class="block text-sm font-bold mb-1">Owner Name</label>
-      <input id="owNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Haji Abdul Rehman">
+      <input id="owNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Mr JB">
       <label class="block text-sm font-bold mb-1">Create Password</label>
       <input id="owNewPass" type="password" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="Choose a password">
       <label class="block text-sm font-bold mb-1">Confirm Password</label>
