@@ -72,10 +72,13 @@ function defaultDB(){
       passPercent:40,
       subjects: DEFAULT_SUBJECTS.slice(),      // default/fallback subject list
       classSubjects:{},                        // { "5th": ["English","Math",...] } per-class overrides
+      attendanceTeacher:{},                    // { "9th": teacherId } — which teacher the Headmaster made attendance in-charge of each class
       gradeScale: GRADE_SCALE.map(g=>({...g})), // editable by headmaster
       classes: DEFAULT_CLASSES.slice(),
       year:'2024-2025',
       timetable:null, // generated array
+      hmSalary:0, hmJoinDate:'',   // Headmaster's monthly salary + joining date — set by the OWNER; records live in DB.salaries['__hm']
+      ownerAccount:null,      // {name,password,gmail} — school OWNER (finance view + owns the Google Drive file)
       headmasterAccount:null, // {name,password,gmail} (gmail is auto-set from the connected Google account) set on first run
       theme:'royal',
       classFee:{}   // {cls: monthlyAmount} — set by Headmaster in Fees tab
@@ -114,7 +117,7 @@ function syncedHash(){ try{ return localStorage.getItem('bfhs_synced_hash'); }ca
 function markSynced(str){ try{ localStorage.setItem('bfhs_synced_hash', strHash(str)); }catch(e){} }
 function setPending(v){ try{ if(v) localStorage.setItem('bfhs_pending_sync','1'); else localStorage.removeItem('bfhs_pending_sync'); }catch(e){} }
 function hasPending(){ try{ return localStorage.getItem('bfhs_pending_sync')==='1'; }catch(e){ return false; } }
-function canWrite(){ return !!(SESSION && (SESSION.role==='headmaster'||SESSION.role==='teacher') && driveLinked()); }
+function canWrite(){ return !!(SESSION && (SESSION.role==='headmaster'||SESSION.role==='teacher'||SESSION.role==='owner') && driveLinked()); }
 function saveDB(){
   const j = JSON.stringify(DB);
   localStorage.setItem(DB_KEY, j);
@@ -196,7 +199,7 @@ applyTheme(DB.config.theme);
    auto-checks for updates roughly every 25 seconds.
    ============================================================ */
 const GOOGLE_CLIENT_ID = '561937132494-v9ffcqt3ijbr44dpr5jlo0f5b61vm7s4.apps.googleusercontent.com';
-const GOOGLE_API_KEY   = 'AIzaSyCfwHvrZJLTr30ERbiUngugaxcm1Eq4r1g';
+const GOOGLE_API_KEY   = 'AIzaSyCzzco0EgdjcwW9zrZf95slLioXK2cU6Cg';
 /* A file id arriving via ?fid= in the URL (i.e. someone opened their
    school's shared link) always wins and is remembered on this device. */
 const urlFid = new URLSearchParams(location.search).get('fid');
@@ -366,7 +369,7 @@ function approvalRequestLinks(schoolName, gmail){
 }
 function copyApprovalRequest(){
   const hm = DB.config.headmasterAccount || {};
-  const text = approvalRequestText(DB.config.schoolName||'My School', hm.gmail||driveConnectedEmail||'');
+  const text = approvalRequestText(DB.config.schoolName||'My School', ownerGmail()||hm.gmail||driveConnectedEmail||'');
   const done = ()=>alert('Request details copied! Paste them into an email/WhatsApp message to '+OWNER_CONTACT_EMAIL);
   if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, ()=>prompt('Copy this and send it to '+OWNER_CONTACT_EMAIL+':', text));
   else prompt('Copy this and send it to '+OWNER_CONTACT_EMAIL+':', text);
@@ -471,7 +474,7 @@ function renderApprovalGate(){
     </div>`;
   }
   const hm = DB.config.headmasterAccount || {};
-  const links = approvalRequestLinks(DB.config.schoolName||'My School', hm.gmail||driveConnectedEmail||'');
+  const links = approvalRequestLinks(DB.config.schoolName||'My School', ownerGmail()||hm.gmail||driveConnectedEmail||'');
   return `
   <div class="min-h-screen flex items-center justify-center p-4">
     <div class="w-full max-w-md doc-frame">
@@ -615,6 +618,7 @@ function driveInitTokenClient(){
               saveDB();
             }
           }catch(e){}
+          try{ if(SESSION && SESSION.role==='owner' && DB.config.ownerAccount){ DB.config.ownerAccount.gmail = p.email; saveDB(); } }catch(e){}
           if(!DRIVE_FILE_ID) driveCreateFile(); else refreshApprovalStatus().then(()=>drivePullNow(true)).then(render);
         })
         .catch(e=>{ driveFail(e); if(!silent) alert('Google Drive sign-in failed: '+e.message); });
@@ -714,7 +718,7 @@ function driveAutoSave(){
    "anyone with the link: viewer" and read with the public key. The result is remembered so the login screen can say
    plainly when the data could not be loaded, instead of silently showing an empty school. */
 let DRIVE_LOAD = {ok:null, err:''};
-const BUILD_TAG='v12';
+const BUILD_TAG='v15';
 function driveParentPull(silent){
   if(!DRIVE_FILE_ID) return Promise.resolve();
   if(!navigator.onLine){ DRIVE_LOAD={ok:false, err:'No internet connection on this device'}; if(!silent) render(); return Promise.resolve(); }
@@ -764,7 +768,7 @@ function retryLoadSchool(){ DRIVE_LOAD={ok:null,err:''}; driveParentPull(true).t
 /* The Headmaster's own Google account always keeps the school file readable by link (parents/teachers need this to see data). */
 let drivePublicEnsured=false;
 function driveEnsurePublic(){
-  if(drivePublicEnsured || !driveAccessToken || !DRIVE_FILE_ID || !SESSION || SESSION.role!=='headmaster') return;
+  if(drivePublicEnsured || !driveAccessToken || !DRIVE_FILE_ID || !SESSION || (SESSION.role!=='headmaster' && SESSION.role!=='owner')) return;
   drivePublicEnsured=true;
   fetch(`https://www.googleapis.com/drive/v3/files/${DRIVE_FILE_ID}/permissions?fields=permissions(type,role)`,{headers:{Authorization:'Bearer '+driveAccessToken}})
     .then(r=>r.ok?r.json():Promise.reject(new Error('perm list '+r.status)))
@@ -831,10 +835,11 @@ function renderCloudSyncPanel(){
   return card(`
     <h2 class="text-xl font-bold text-[var(--navy)] mb-4">☁️ Cloud Sync (Google Drive)</h2>
     <p class="text-sm text-gray-600 mb-3">${statusLine}${driveLastSync?` · Last synced ${driveLastSync.toLocaleTimeString()}`:''}</p>
+    ${DB.config.ownerAccount?`<p class="text-xs text-gray-600 mb-3 bg-gray-50 rounded-lg p-2">🏦 This school's Google Drive belongs to the <b>School Owner</b>${DB.config.ownerAccount.gmail?` (${esc(DB.config.ownerAccount.gmail)})`:''}. The Owner creates the file and shares it (Editor) with the Headmaster and teachers; everyone's updates are saved there, so nothing is lost if the Headmaster changes.</p>`:''}
     ${!DRIVE_FILE_ID?'<p class="text-sm text-amber-600 mb-3">No data file yet for this school — click Connect below to create one (do this once, as Headmaster).</p>':''}
     <div class="flex flex-wrap gap-3">
       ${driveLinked()?'':`<button onclick="driveConnect()" class="navy-btn rounded-lg px-5 py-2 font-bold">🔗 Connect Google Drive</button>`}
-      ${(driveLinked() && DRIVE_FILE_ID && SESSION && SESSION.role==='teacher')?`<button onclick="driveOfferPicker(true)" class="gold-btn rounded-lg px-5 py-2 font-bold ${DRIVE_NEEDS_ACCESS?'':'opacity-80'}">🔓 Allow access to school file</button>`:''}
+      ${(driveLinked() && DRIVE_FILE_ID && SESSION && (SESSION.role==='teacher'||SESSION.role==='owner'||(SESSION.role==='headmaster' && DB.config.ownerAccount)))?`<button onclick="driveOfferPicker(true)" class="gold-btn rounded-lg px-5 py-2 font-bold ${DRIVE_NEEDS_ACCESS?'':'opacity-80'}">🔓 Allow access to school file</button>`:''}
       <button onclick="driveSaveNow(false)" class="gold-btn rounded-lg px-5 py-2 font-bold">⬆️ Save Now</button>
       <button onclick="drivePullNow(false)" class="bg-gray-200 rounded-lg px-5 py-2 font-bold">⬇️ Load Latest</button>
       ${DRIVE_FILE_ID?`<button onclick="driveMakePublicReadable()" class="bg-purple-600 text-white rounded-lg px-5 py-2 font-bold">👀 Enable Parent Viewing</button>`:''}
@@ -870,7 +875,7 @@ setInterval(()=>{
   const doApproval = Date.now()>=APPROVAL_NEXT_AT ? refreshApprovalStatus() : Promise.resolve();
   doApproval.then(()=>{
     if(hasPending() && canWrite()){ return driveSyncCycle(); }
-    if(SESSION && (SESSION.role==='parent' || (SESSION.role==='teacher' && !driveLinked()))){ return driveParentPull(true).then(()=>{ if(SESSION) render(); }); }
+    if(SESSION && (SESSION.role==='parent' || ((SESSION.role==='teacher'||SESSION.role==='owner') && !driveLinked()))){ return driveParentPull(true).then(()=>{ if(SESSION) render(); }); }
     if(DRIVE_FILE_ID && driveLinked() && !hasPending()){ return driveSyncCycle().then(()=>{ if(SESSION) render(); }); }
     if(SESSION){ render(); } // catches a plan that just expired/got denied, even with nothing else to sync
   });
@@ -915,6 +920,77 @@ function subjectsForClass(cls){
   if(custom && custom.length) return custom;
   const st = classStream(cls);
   return (st && STREAM_SUBJECTS[st]) ? STREAM_SUBJECTS[st] : DB.config.subjects;
+}
+
+/* ============================================================
+   TEACHER ASSIGNMENTS — the Headmaster decides which classes / subjects / periods each teacher has.
+   t.assignments = [{id, cls, subject, periods:[1,3,..]}]   (a teacher can have many; the same class can appear with
+   different subjects; different periods can go to different classes).
+   Teachers saved before this feature have no t.assignments ("legacy"): they keep working exactly as before
+   (class teacher of t.cls, all subjects, attendance) until the Headmaster edits their assignments.
+   DB.config.attendanceTeacher[cls] = teacherId  — who takes the attendance of that class.
+   ============================================================ */
+function teacherIsLegacy(t){ return !t || !Array.isArray(t.assignments); }
+function teacherAssignments(t){
+  if(!teacherIsLegacy(t)) return t.assignments;
+  return (t && t.cls) ? [{id:'legacy', cls:t.cls, subject:t.subject||'', periods:[], legacy:true}] : [];
+}
+function sortClasses(list){
+  const order = DB.config.classes;
+  return list.slice().sort((x,y)=>{ const ix=order.indexOf(x), iy=order.indexOf(y); return (ix<0?999:ix)-(iy<0?999:iy) || String(x).localeCompare(String(y)); });
+}
+function teacherClasses(t){
+  const set=[]; teacherAssignments(t).forEach(a=>{ if(a.cls && !set.includes(a.cls)) set.push(a.cls); });
+  return sortClasses(set);
+}
+function teacherSubjectsIn(t, cls){
+  if(teacherIsLegacy(t)) return (t && t.cls===cls) ? subjectsForClass(cls) : [];
+  return [...new Set(t.assignments.filter(a=>a.cls===cls).map(a=>a.subject).filter(Boolean))];
+}
+function shortList(arr, n){ n=n||3; return arr.length>n ? arr.slice(0,n).join(', ')+` +${arr.length-n}` : arr.join(', '); }
+function teacherSubjectText(t){
+  if(teacherIsLegacy(t)) return t.subject||'';
+  return shortList([...new Set(t.assignments.map(a=>a.subject).filter(Boolean))]) || '—';
+}
+function teacherClassText(t){
+  if(teacherIsLegacy(t)) return t.cls||'';
+  return shortList(teacherClasses(t)) || '—';
+}
+function teacherLabel(t){ return `${teacherSubjectText(t)} (${teacherClassText(t)})`; }
+function attendanceMap(){ if(!DB.config.attendanceTeacher) DB.config.attendanceTeacher={}; return DB.config.attendanceTeacher; }
+function attendanceClassesFor(t){
+  if(!t) return [];
+  const m=attendanceMap(), out=[];
+  const all = DB.config.classes.slice(); if(t.cls && !all.includes(t.cls)) all.push(t.cls);
+  all.forEach(c=>{
+    if(m[c]){ if(m[c]===t.id) out.push(c); }
+    else if(teacherIsLegacy(t) && t.cls===c) out.push(c);      // default (old behaviour): the class teacher
+  });
+  return out;
+}
+function curTeacher(){ return (SESSION && SESSION.role==='teacher') ? DB.teachers.find(t=>t.id===SESSION.teacherId) : null; }
+let TEACHER_PICK = {};
+function teacherPick(ctx, allowed){
+  const el = document.getElementById('tpick_'+ctx);
+  let v = el ? el.value : TEACHER_PICK[ctx];
+  if(!allowed.includes(v)) v = allowed[0];
+  TEACHER_PICK[ctx] = v; return v;
+}
+function teacherPickerHtml(ctx, allowed, cur){
+  if(allowed.length<=1) return '';
+  return `<div class="mb-4 flex items-center gap-2 flex-wrap"><label class="font-bold text-sm">Class:</label>
+    <select id="tpick_${ctx}" onchange="render()" class="border rounded-lg px-3 py-2 font-bold">${allowed.map(c=>`<option ${c===cur?'selected':''}>${esc(c)}</option>`).join('')}</select>
+    <span class="text-xs text-gray-500">The Headmaster assigned you ${allowed.length} classes</span></div>`;
+}
+function noAssignCard(teacher, what){
+  const mine = teacherClasses(teacher);
+  const msg = what==='attendance'
+    ? (mine.length ? `The Headmaster has not made you attendance in-charge of any class yet. You can still enter marks and homework for: <b>${mine.map(esc).join(', ')}</b>.`
+                   : `The Headmaster has not assigned you any class yet.`)
+    : `The Headmaster has not assigned you any class or subject yet.`;
+  return card(`<div class="text-center py-8"><div class="text-4xl mb-2">🔒</div>
+    <p class="text-gray-700 text-sm">${msg}</p>
+    <p class="text-xs text-gray-500 mt-2">Classes, subjects, periods and attendance duty are decided by the Headmaster (Teachers → 📚 Assign Classes).</p></div>`);
 }
 /* Each exam (PT-1, PT-2, Mid, Final) is out of 100 marks per subject.
    The OVERALL marksheet (obtained / grade / result) follows a PROGRESSIVE rule:
@@ -1386,7 +1462,7 @@ function renderLogin(){
         </div>
         <div class="p-6 font-ui">
           <div class="flex rounded-lg overflow-hidden border border-gray-300 mb-4 text-sm">
-            ${['headmaster','teacher','parent'].map((r,i)=>`
+            ${['headmaster','teacher','parent','owner'].map((r,i)=>`
               <button data-role="${r}" class="role-tab flex-1 py-2 ${i===0?'tab-btn active':''} bg-gray-50" onclick="selectRole('${r}')">${r[0].toUpperCase()+r.slice(1)}</button>
             `).join('')}
           </div>
@@ -1431,8 +1507,10 @@ function selectRole(role){
         <label class="block text-sm font-bold mb-1">Password</label>
         <input id="loginPass" type="password" class="w-full border rounded-lg px-3 py-2" placeholder="Enter password">`;
     }
+  } else if(role==='owner'){
+    box.innerHTML = ownerLoginFields();
   } else if(role==='teacher'){
-    const opts = DB.teachers.map(t=>`<option value="${t.id}">${esc(t.name)} — ${esc(t.subject)} (${esc(t.cls)})</option>`).join('');
+    const opts = DB.teachers.map(t=>`<option value="${t.id}">${esc(t.name)} — ${esc(teacherLabel(t))}</option>`).join('');
     box.innerHTML = `<label class="block text-sm font-bold mb-1">Select Teacher</label>
       <select id="loginTeacher" class="w-full border rounded-lg px-3 py-2 mb-3">${opts || '<option value="">No teachers added yet</option>'}</select>
       <label class="block text-sm font-bold mb-1">Password</label>
@@ -1473,6 +1551,8 @@ function doLogin(){
     const acc = DB.config.headmasterAccount;
     if(name.toLowerCase()===String(acc.name).toLowerCase() && pass===acc.password){ setSession({role:'headmaster'}); render(); }
     else showErr('Incorrect name or password.');
+  } else if(CURRENT_ROLE==='owner'){
+    ownerDoLogin(showErr);
   } else if(CURRENT_ROLE==='teacher'){
     const tid = document.getElementById('loginTeacher').value;
     if(!tid){ showErr('Please add a teacher first (Headmaster > Teachers).'); return; }
@@ -1532,6 +1612,7 @@ const HM_TABS = [
   {key:'marks', label:'Marks Overview', icon:'📊'},
   {key:'fees', label:'Fees', icon:'💰'},
   {key:'salary', label:'Salary', icon:'🧾'},
+  {key:'hmsalary', label:'My Salary', icon:'💼'},
   {key:'homework', label:'Homework', icon:'📚'},
   {key:'idcards', label:'ID Cards', icon:'🪪'},
   {key:'certificates', label:'Certificates', icon:'📜'},
@@ -1545,18 +1626,19 @@ function renderHeadmaster(){
   if(ACTIVE_TAB==='setup') content = hmSetup();
   if(ACTIVE_TAB==='cloudsync') content = renderCloudSyncPanel();
   if(ACTIVE_TAB==='announcements') content = hmAnnouncements();
-  if(ACTIVE_TAB==='timetable') content = hmTimetable();
+  if(ACTIVE_TAB==='timetable') content = `<div class="space-y-5">${hmTimetable()}${teacherAllotmentCard()}</div>`;
   if(ACTIVE_TAB==='teachers') content = hmTeachers();
   if(ACTIVE_TAB==='teacherAttendance') content = hmTeacherAttendance();
   if(ACTIVE_TAB==='students') content = hmStudents();
   if(ACTIVE_TAB==='marks') content = hmMarksOverview();
   if(ACTIVE_TAB==='fees') content = hmFees();
   if(ACTIVE_TAB==='salary') content = hmSalary();
+  if(ACTIVE_TAB==='hmsalary') content = hmMySalary();
   if(ACTIVE_TAB==='homework') content = hmHomework();
   if(ACTIVE_TAB==='idcards') content = hmIdCards();
   if(ACTIVE_TAB==='certificates') content = hmCertificates();
   if(ACTIVE_TAB==='promotion') content = hmPromotion();
-  if(ACTIVE_TAB==='backup') content = hmBackup();
+  if(ACTIVE_TAB==='backup') content = `<div class="space-y-5">${hmBackup()}${reportCard()}</div>`;
   document.getElementById('app').innerHTML = shell('Headmaster', HM_TABS, ACTIVE_TAB, content);
 }
 
@@ -1841,7 +1923,177 @@ function updateTTTime(idx, field, value){
   }
 }
 
-function hmTeachers(){
+
+/* ============================================================
+   HEADMASTER — assign classes / subjects / periods to each teacher, attendance in-charge, class × period chart
+   ============================================================ */
+let ASSIGN_EDIT = null;   // {tid, rows:[{id, cls, subject, periods:[]}]} — working copy while the Headmaster edits
+function periodTitle(n){
+  const r = (DB.config.timetable||[]).find(x=>x.type==='period' && x.num===n);
+  return r ? `${ordinal2(n)} period · ${minToTime(timeToMin(r.start))} – ${minToTime(timeToMin(r.end))}` : `${ordinal2(n)} period`;
+}
+function ordinal2(n){ const s=['th','st','nd','rd'], v=n%100; return n+(s[(v-20)%10]||s[v]||s[0]); }
+function openAssignEditor(tid){
+  const t = DB.teachers.find(x=>x.id===tid); if(!t) return;
+  const rows = teacherAssignments(t).map(a=>({id:a.legacy?uid():a.id, cls:a.cls, subject:a.subject||'', periods:(a.periods||[]).slice()}));
+  if(!rows.length) rows.push({id:uid(), cls:DB.config.classes[0], subject:'', periods:[]});
+  ASSIGN_EDIT = {tid, rows};
+  render(); setTimeout(()=>{ document.getElementById('assignEditor')?.scrollIntoView({behavior:'smooth',block:'start'}); },0);
+}
+function asgAddRow(){ const last=ASSIGN_EDIT.rows[ASSIGN_EDIT.rows.length-1]; ASSIGN_EDIT.rows.push({id:uid(), cls:(last&&last.cls)||DB.config.classes[0], subject:'', periods:[]}); render(); }
+function asgSet(i, field, val){
+  const r = ASSIGN_EDIT && ASSIGN_EDIT.rows[i]; if(!r) return;
+  r[field] = val;
+  if(field==='cls' && r.subject && !subjectsForClass(val).includes(r.subject)) r.subject='';
+  render();
+}
+function asgTogglePeriod(i, n){
+  const r = ASSIGN_EDIT && ASSIGN_EDIT.rows[i]; if(!r) return;
+  const k = r.periods.indexOf(n);
+  if(k>=0) r.periods.splice(k,1); else { r.periods.push(n); r.periods.sort((a,b)=>a-b); }
+  render();
+}
+function asgRemoveRow(i){ if(!ASSIGN_EDIT) return; ASSIGN_EDIT.rows.splice(i,1); render(); }
+function asgCancel(){ ASSIGN_EDIT=null; render(); }
+function asgSave(){
+  const E = ASSIGN_EDIT; if(!E) return;
+  const t = DB.teachers.find(x=>x.id===E.tid); if(!t){ ASSIGN_EDIT=null; render(); return; }
+  // 1) every row complete; the same class+subject twice is merged into one
+  const merged = new Map();
+  for(const r of E.rows){
+    if(!r.cls || !r.subject){ alert('Every row needs a class and a subject — fill it in or remove the row.'); return; }
+    const k = r.cls+'||'+r.subject;
+    if(merged.has(k)){ const m=merged.get(k); m.periods=[...new Set([...m.periods, ...r.periods])].sort((a,b)=>a-b); }
+    else merged.set(k, {id:r.id, cls:r.cls, subject:r.subject, periods:r.periods.slice().sort((a,b)=>a-b)});
+  }
+  const rows = [...merged.values()];
+  // 2) a teacher cannot be in two classes in the same period (hard stop)
+  const used = {};
+  for(const r of rows) for(const p of r.periods){
+    if(used[p]){ alert(`Period ${p} is given twice to ${t.name}:\n• Class ${used[p].cls} — ${used[p].subject}\n• Class ${r.cls} — ${r.subject}\n\nA teacher cannot be in two classes in the same period.`); return; }
+    used[p] = r;
+  }
+  // 3) a class normally has one teacher per period (soft warning, Headmaster may override)
+  const soft = [];
+  DB.teachers.forEach(o=>{
+    if(o.id===t.id || teacherIsLegacy(o)) return;
+    o.assignments.forEach(a=>rows.forEach(r=>{
+      if(a.cls!==r.cls) return;
+      const common = (a.periods||[]).filter(p=>r.periods.includes(p));
+      if(common.length) soft.push(`Class ${r.cls}, period ${common.join(', ')} already belongs to ${o.name} (${a.subject})`);
+    }));
+  });
+  if(soft.length && !confirm('These periods are already given to another teacher:\n\n• '+soft.join('\n• ')+'\n\nSave anyway?')) return;
+  // 4) apply
+  const wasLegacy = teacherIsLegacy(t), oldCls = t.cls, notes = [];
+  t.assignments = rows;
+  if(rows.length){ t.subject = rows[0].subject; t.cls = rows[0].cls; }   // keep the primary subject/class in sync for older screens/exports
+  const m = attendanceMap();
+  if(wasLegacy && oldCls && !m[oldCls] && rows.some(r=>r.cls===oldCls)){ m[oldCls]=t.id; notes.push(`Attendance of Class ${oldCls} stays with ${t.name} (change it in "Attendance In-charge" below).`); }
+  Object.keys(m).forEach(c=>{ if(m[c]===t.id && !rows.some(r=>r.cls===c)){ delete m[c]; notes.push(`${t.name} no longer takes attendance of Class ${c}.`); } });
+  ASSIGN_EDIT = null; saveDB(); render();
+  if(notes.length) alert(notes.join('\n'));
+}
+function assignEditorCard(){
+  const E = ASSIGN_EDIT; if(!E) return '';
+  const t = DB.teachers.find(x=>x.id===E.tid); if(!t) return '';
+  const total = DB.config.totalPeriods || 8;
+  const rowsHtml = E.rows.map((r,i)=>{
+    const subs = subjectsForClass(r.cls).slice(); if(r.subject && !subs.includes(r.subject)) subs.push(r.subject);
+    const chips = Array.from({length:total},(_,k)=>k+1).map(n=>`<button type="button" onclick="asgTogglePeriod(${i},${n})" title="${esc(periodTitle(n))}" class="w-9 h-9 rounded-lg text-sm font-bold ${r.periods.includes(n)?'navy-btn':'bg-gray-100'}">${n}</button>`).join('');
+    return `<div class="border rounded-xl p-3 bg-gray-50">
+      <div class="grid md:grid-cols-[1fr_1fr_auto] gap-3 items-end">
+        <div><label class="block text-xs font-bold text-gray-500 mb-1">Class</label>
+          <select onchange="asgSet(${i},'cls',this.value)" class="w-full border rounded-lg px-3 py-2 bg-white">${DB.config.classes.map(c=>`<option ${c===r.cls?'selected':''}>${esc(c)}</option>`).join('')}</select></div>
+        <div><label class="block text-xs font-bold text-gray-500 mb-1">Subject</label>
+          <select onchange="asgSet(${i},'subject',this.value)" class="w-full border rounded-lg px-3 py-2 bg-white"><option value="" ${r.subject?'':'selected'}>— Select subject —</option>${subs.map(x=>`<option ${x===r.subject?'selected':''}>${esc(x)}</option>`).join('')}</select></div>
+        <button onclick="asgRemoveRow(${i})" class="text-red-600 text-sm font-bold px-2 py-2" title="Remove this row">🗑️ Remove</button>
+      </div>
+      <div class="mt-3"><label class="block text-xs font-bold text-gray-500 mb-1">Periods <span class="font-normal">(tap the period numbers this teacher teaches this subject to this class — optional)</span></label>
+        <div class="flex flex-wrap gap-1.5">${chips}</div></div>
+    </div>`;
+  }).join('');
+  return card(`<div id="assignEditor">
+    <h2 class="text-xl font-bold text-[var(--navy)] mb-1">📚 Assign Classes — ${esc(t.name)}</h2>
+    <p class="text-sm text-gray-500 mb-4">Give ${esc(t.name)} one or more rows. The same teacher can teach different classes and different subjects in different periods, and even the same class more than one subject. The teacher can enter marks and homework only for the class + subject rows given here.${teacherIsLegacy(t)?' <b>Right now this teacher still works as a plain class teacher of '+esc(t.cls||'—')+' (all subjects); saving switches them to exactly the rows below.</b>':''}</p>
+    <div class="space-y-3">${rowsHtml}</div>
+    <div class="flex flex-wrap gap-2 mt-4">
+      <button onclick="asgAddRow()" class="bg-gray-200 rounded-lg px-4 py-2 font-bold">+ Add another class / subject</button>
+      <button onclick="asgSave()" class="navy-btn rounded-lg px-5 py-2 font-bold">💾 Save Assignments</button>
+      <button onclick="asgCancel()" class="bg-gray-100 rounded-lg px-4 py-2 font-bold">Cancel</button>
+    </div></div>`);
+}
+function setAttIncharge(cls, tid){ const m=attendanceMap(); if(tid) m[cls]=tid; else delete m[cls]; saveDB(); render(); }
+function attendanceInchargeCard(){
+  const m = attendanceMap();
+  const rows = DB.config.classes.map(c=>{
+    const elig = DB.teachers.filter(t=>teacherClasses(t).includes(c));
+    const cur = (m[c] && DB.teachers.some(t=>t.id===m[c])) ? m[c] : '';
+    const legacyNames = DB.teachers.filter(t=>teacherIsLegacy(t) && t.cls===c).map(t=>t.name);
+    const cnt = DB.students.filter(s=>s.cls===c).length;
+    const opts = [`<option value="" ${cur?'':'selected'}>— Not assigned${legacyNames.length?` (default: ${esc(legacyNames.join(', '))})`:''}</option>`]
+      .concat(elig.map(t=>`<option value="${t.id}" ${t.id===cur?'selected':''}>${esc(t.name)}</option>`)).join('');
+    return `<tr class="border-b"><td class="py-2 font-bold">${esc(c)}</td><td class="text-xs text-gray-500">${cnt} student${cnt===1?'':'s'}</td>
+      <td>${elig.length||cur?`<select onchange="setAttIncharge('${esc(c)}',this.value)" class="border rounded-lg px-2 py-1 text-sm">${opts}</select>`:'<span class="text-xs text-gray-400">No teacher assigned to this class yet</span>'}</td></tr>`;
+  }).join('');
+  return card(`
+    <h2 class="text-xl font-bold text-[var(--navy)] mb-1">✅ Attendance In-charge</h2>
+    <p class="text-sm text-gray-500 mb-3">Choose which teacher takes the daily attendance of each class. Only that teacher sees the class in their Attendance tab. Teachers appear here once they have been given that class in <b>📚 Assign Classes</b>.</p>
+    <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Class</th><th>Students</th><th>Attendance taken by</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+}
+/* Class × period chart for the Headmaster (Timetable tab) */
+function teacherAllotmentCard(){
+  const total = DB.config.totalPeriods || 8;
+  const cells = {}, unsched = [];
+  DB.teachers.forEach(t=>{
+    if(teacherIsLegacy(t)) return;
+    t.assignments.forEach(a=>{
+      if(!(a.periods||[]).length){ unsched.push({t,a}); return; }
+      a.periods.forEach(pn=>{ cells[a.cls] = cells[a.cls]||{}; (cells[a.cls][pn] = cells[a.cls][pn]||[]).push({t,a}); });
+    });
+  });
+  const shown = DB.config.classes.filter(c=>cells[c]);
+  const head = Array.from({length:total},(_,k)=>`<th class="px-2 py-2 text-center" title="${esc(periodTitle(k+1))}">${k+1}</th>`).join('');
+  const body = shown.map(c=>`<tr class="border-t"><td class="px-2 py-2 font-bold whitespace-nowrap">${esc(c)}</td>${Array.from({length:total},(_,k)=>{
+      const list = (cells[c]||{})[k+1] || [];
+      if(!list.length) return `<td class="px-2 py-2 text-center text-gray-300">–</td>`;
+      return `<td class="px-2 py-1 text-xs ${list.length>1?'bg-red-50 border border-red-300':''}" title="${list.length>1?'Clash: two teachers in the same period':''}">${list.map(x=>`<div><b>${esc(x.a.subject)}</b><br><span class="text-gray-600">${esc(x.t.name)}</span></div>`).join('<hr class="my-1">')}</td>`;
+    }).join('')}</tr>`).join('');
+  const un = unsched.length ? `<p class="text-xs text-gray-600 mt-3"><b>Given without a period:</b> ${unsched.map(x=>`${esc(x.t.name)} — ${esc(x.a.subject)} (${esc(x.a.cls)})`).join(' · ')}</p>` : '';
+  return card(`
+    <h2 class="text-xl font-bold text-[var(--navy)] mb-1">🧑‍🏫 Teacher Allotment — Class × Period</h2>
+    ${shown.length ? `<p class="text-xs text-gray-500 mb-3">Who teaches which subject to which class in each period (set in Teachers → 📚 Assign Classes). Red = two teachers in one period of a class.</p>
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-gray-500"><th class="px-2 py-2 text-left">Class</th>${head}</tr></thead><tbody>${body}</tbody></table></div>${un}`
+      : `<p class="text-sm text-gray-500">Nothing allotted by period yet. Open <b>Teachers → 📚 Assign Classes</b> to give each teacher their classes, subjects and periods — the class × period chart appears here.</p>${un}`}`);
+}
+/* Teacher: "My teaching schedule" (Timetable tab) */
+function teacherScheduleCard(teacher){
+  const rows = teacherAssignments(teacher);
+  const attCls = attendanceClassesFor(teacher);
+  const body = rows.map(a=>`<tr class="border-b"><td class="py-2 font-bold">${esc(a.cls)}</td><td>${esc(a.subject||'All subjects')}</td>
+      <td>${(a.periods||[]).length?(a.periods||[]).map(n=>`<span class="ann-badge bg-blue-100 text-blue-700" title="${esc(periodTitle(n))}">${n}</span>`).join(' '):'<span class="text-gray-400 text-xs">—</span>'}</td>
+      <td>${attCls.includes(a.cls)?'<span class="ann-badge bg-green-100 text-green-700">✅ Attendance</span>':''}</td></tr>`).join('')
+    || `<tr><td colspan="4" class="text-center text-gray-400 py-3">The Headmaster has not assigned you any class yet.</td></tr>`;
+  return card(`
+    <h2 class="text-xl font-bold text-[var(--navy)] mb-1">🧑‍🏫 My Classes &amp; Periods</h2>
+    <p class="text-xs text-gray-500 mb-3">${teacherIsLegacy(teacher)?'You are the class teacher of '+esc(teacher.cls||'—')+'.':'As decided by the Headmaster.'}${attCls.length?' You take the attendance of: <b>'+attCls.map(esc).join(', ')+'</b>.':''}</p>
+    <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Class</th><th>Subject</th><th>Periods</th><th></th></tr></thead><tbody>${body}</tbody></table></div>`);
+}
+/* Parent: the teachers of the child's class (Timetable tab) */
+function classTeachersCard(cls){
+  const by = {};
+  DB.teachers.forEach(t=>teacherAssignments(t).filter(a=>a.cls===cls).forEach(a=>{
+    const k = a.subject||'—'; (by[k]=by[k]||[]).push({t, periods:a.periods||[]});
+  }));
+  const subs = Object.keys(by); if(!subs.length) return '';
+  const body = subs.map(k=>`<tr class="border-b"><td class="py-2 font-bold">${esc(k)}</td><td>${by[k].map(x=>esc(x.t.name)).join(', ')}</td>
+      <td>${[...new Set(by[k].flatMap(x=>x.periods))].sort((a,b)=>a-b).map(n=>`<span class="ann-badge bg-blue-100 text-blue-700">${n}</span>`).join(' ')||'<span class="text-gray-400 text-xs">—</span>'}</td></tr>`).join('');
+  return card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-3">👩‍🏫 Teachers of Class ${esc(cls)}</h2>
+    <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Subject</th><th>Teacher</th><th>Periods</th></tr></thead><tbody>${body}</tbody></table></div>`);
+}
+
+function hmTeachers(){ return `<div class="space-y-5">${assignEditorCard()}${hmTeachersBase()}${attendanceInchargeCard()}</div>`; }
+function hmTeachersBase(){
   const rows = DB.teachers.map(t=>{
     const accessBadge = t.drivePermissionId
       ? `<span class="ann-badge bg-green-100 text-green-700">✅ Can Save to Drive</span>`
@@ -1849,10 +2101,11 @@ function hmTeachers(){
     return `
     <tr class="border-b">
       <td class="py-2">${t.photo?`<img src="${t.photo}" class="w-9 h-9 rounded-full object-cover">`:'<span class="text-xl">👤</span>'}</td>
-      <td>${esc(t.name)}</td><td>${esc(t.subject)}</td><td>${esc(t.cls)}</td>
+      <td>${esc(t.name)}</td><td>${esc(teacherSubjectText(t))}</td><td>${esc(teacherClassText(t))}${teacherIsLegacy(t)?'':' <span class="ann-badge bg-blue-100 text-blue-700" title="Assigned by Headmaster">'+teacherAssignments(t).length+' slot'+(teacherAssignments(t).length>1?'s':'')+'</span>'}</td>
       <td class="text-xs">${esc(t.gmail||'—')}</td>
       <td>${accessBadge}</td>
       <td class="whitespace-nowrap">
+        <button onclick="openAssignEditor('${t.id}')" class="text-purple-700 text-sm font-bold mr-2" title="Classes, subjects and periods of this teacher">📚 Assign Classes</button>
         <button onclick="editTeacher('${t.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">✏️ Edit</button>
         <button onclick="resetTeacherPass('${t.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">🔑 Password</button>
         <button onclick="editTeacherSalaryInfo('${t.id}')" class="text-[var(--navy)] text-sm font-bold mr-2">🧾 Join/Salary</button>
@@ -1908,13 +2161,16 @@ function addTeacher(){
 function editTeacher(id){
   const t = DB.teachers.find(x=>x.id===id); if(!t) return;
   const name = prompt('Teacher name:', t.name); if(name===null) return;
-  const subject = prompt('Subject:', t.subject); if(subject===null) return;
-  const cls = prompt('Class (one of: '+DB.config.classes.join(', ')+'):', t.cls); if(cls===null) return;
-  if(!DB.config.classes.includes(cls.trim())){ alert('That class does not exist. Use exactly one of: '+DB.config.classes.join(', ')); return; }
+  const explicit = !teacherIsLegacy(t);   // classes/subjects/periods of such a teacher are managed in 📚 Assign Classes
+  const subject = explicit ? t.subject : prompt('Subject:', t.subject); if(subject===null) return;
+  const cls = explicit ? t.cls : prompt('Class (one of: '+DB.config.classes.join(', ')+'):', t.cls); if(cls===null) return;
+  if(!explicit && !DB.config.classes.includes(cls.trim())){ alert('That class does not exist. Use exactly one of: '+DB.config.classes.join(', ')); return; }
   const gmail = prompt('Gmail (for Drive access):', t.gmail||''); if(gmail===null) return;
   const gChanged = (gmail.trim().toLowerCase() !== (t.gmail||'').trim().toLowerCase());
   const oldPerm = t.drivePermissionId;
-  t.name=name.trim()||t.name; t.subject=subject.trim()||t.subject; t.cls=cls.trim(); t.gmail=gmail.trim();
+  const oldCls = t.cls;
+  t.name=name.trim()||t.name; t.subject=String(subject).trim()||t.subject; t.cls=String(cls).trim(); t.gmail=gmail.trim();
+  if(!explicit && oldCls!==t.cls){ const m=attendanceMap(); if(m[oldCls]===t.id) delete m[oldCls]; }
   if(gChanged && oldPerm){
     t.drivePermissionId=null; saveDB(); render();
     if(driveAccessToken && DRIVE_FILE_ID){
@@ -1926,7 +2182,7 @@ function editTeacher(id){
   saveDB(); render();
   if(gChanged && t.gmail && driveAccessToken) driveGrantTeacherAccess(t.id);
 }
-function delTeacher(id){ if(confirm('Remove this teacher?')){ DB.teachers = DB.teachers.filter(t=>t.id!==id); saveDB(); render(); } }
+function delTeacher(id){ if(confirm('Remove this teacher?')){ DB.teachers = DB.teachers.filter(t=>t.id!==id); const m=attendanceMap(); Object.keys(m).forEach(c=>{ if(m[c]===id) delete m[c]; }); if(ASSIGN_EDIT && ASSIGN_EDIT.tid===id) ASSIGN_EDIT=null; saveDB(); render(); } }
 function editTeacherSalaryInfo(id){
   const t = DB.teachers.find(x=>x.id===id); if(!t) return;
   const jd = prompt(`Join Date for ${t.name} (YYYY-MM-DD) — used to track how many months of salary are due:`, t.joinDate || schoolYearStart());
@@ -1984,7 +2240,7 @@ function hmTeacherAttendance(){
   const rows = DB.teachers.map(t=>{
     const status = att[t.id] || 'P';
     return `<tr class="border-b">
-      <td class="py-2">${esc(t.name)}</td><td>${esc(t.subject)} (${esc(t.cls)})</td>
+      <td class="py-2">${esc(t.name)}</td><td>${esc(teacherLabel(t))}</td>
       <td class="whitespace-nowrap">
         <button onclick="markTeacherAtt('${date}','${t.id}','P')" class="px-3 py-1 rounded-lg text-xs font-bold mr-1 ${status==='P'?'bg-green-600 text-white':'bg-gray-100'}">Present</button>
         <button onclick="markTeacherAtt('${date}','${t.id}','A')" class="px-3 py-1 rounded-lg text-xs font-bold mr-1 ${status==='A'?'bg-red-600 text-white':'bg-gray-100'}">Absent</button>
@@ -2399,17 +2655,17 @@ function renderTeacher(){
   let content='';
   if(ACTIVE_TAB==='attendance') content = tAttendance(teacher);
   if(ACTIVE_TAB==='marksentry') content = tMarksEntry(teacher);
-  if(ACTIVE_TAB==='students') content = studentManagerCard(teacher.cls);
+  if(ACTIVE_TAB==='students') content = tStudents(teacher);
   if(ACTIVE_TAB==='progress') content = tProgress(teacher);
   if(ACTIVE_TAB==='homework') content = tHomework(teacher);
   if(ACTIVE_TAB==='salary') content = renderTeacherSalary(teacher);
   if(ACTIVE_TAB==='announcements') content = renderAnnouncements('teacher');
-  if(ACTIVE_TAB==='timetable') content = DB.config.timetable ? renderTimetableCard({}) : card('<p class="text-gray-500 text-center py-10">Timetable not generated yet.</p>');
+  if(ACTIVE_TAB==='timetable') content = `<div class="space-y-5">${teacherScheduleCard(teacher)}${DB.config.timetable ? renderTimetableCard({}) : card('<p class="text-gray-500 text-center py-10">Timetable not generated yet.</p>')}</div>`;
   if(ACTIVE_TAB==='idcard') content = tIdCard(teacher);
   if(ACTIVE_TAB==='staff') content = renderStaffDirectory();
   if(ACTIVE_TAB==='backup') content = tBackup(teacher);
   content = teacherSyncBanner()+content;
-  document.getElementById('app').innerHTML = shell(`Teacher — ${esc(teacher.name)} (${esc(teacher.cls)})`, T_TABS, ACTIVE_TAB, content);
+  document.getElementById('app').innerHTML = shell(`Teacher — ${esc(teacher.name)} (${esc(teacherClassText(teacher))})`, T_TABS, ACTIVE_TAB, content);
 }
 function tBackup(teacher){
   const gmail = DB.config.headmasterAccount?.gmail || '';
@@ -2431,24 +2687,28 @@ function teacherEmailBackup(){
   window.open(`https://mail.google.com/mail/?view=cm&fs=1&to=${to}&su=${subject}&body=${body}`, '_blank');
 }
 function tAttendance(teacher){
-  // Only the teacher(s) assigned to this class can mark its attendance — enforced by filtering on teacher.cls.
+  // The Headmaster decides which teacher takes the attendance of which class (Teachers → Attendance In-charge).
+  const classes = attendanceClassesFor(teacher);
+  if(!classes.length) return noAssignCard(teacher,'attendance');
+  const cls = teacherPick('att', classes);
   const date = document.getElementById('attDate')?.value || new Date().toISOString().slice(0,10);
-  const key = `${teacher.cls}|${date}`;
+  const key = `${cls}|${date}`;
   const att = DB.attendance[key] || {};
-  const students = DB.students.filter(s=>s.cls===teacher.cls);
+  const students = DB.students.filter(s=>s.cls===cls);
   const rows = students.map(s=>{
     const status = att[s.id] || 'P';
     return `<tr class="border-b">
       <td class="py-2">${esc(s.roll)}</td><td>${esc(s.name)}</td>
       <td class="whitespace-nowrap">
-        <button onclick="markAtt('${teacher.cls}','${date}','${s.id}','P')" class="px-3 py-1 rounded-lg text-xs font-bold mr-1 ${status==='P'?'bg-green-600 text-white':'bg-gray-100'}">Present</button>
-        <button onclick="markAtt('${teacher.cls}','${date}','${s.id}','A')" class="px-3 py-1 rounded-lg text-xs font-bold mr-1 ${status==='A'?'bg-red-600 text-white':'bg-gray-100'}">Absent</button>
-        <button onclick="markAtt('${teacher.cls}','${date}','${s.id}','L')" class="px-3 py-1 rounded-lg text-xs font-bold ${status==='L'?'bg-amber-500 text-white':'bg-gray-100'}">Leave</button>
+        <button onclick="markAtt('${esc(cls)}','${date}','${s.id}','P')" class="px-3 py-1 rounded-lg text-xs font-bold mr-1 ${status==='P'?'bg-green-600 text-white':'bg-gray-100'}">Present</button>
+        <button onclick="markAtt('${esc(cls)}','${date}','${s.id}','A')" class="px-3 py-1 rounded-lg text-xs font-bold mr-1 ${status==='A'?'bg-red-600 text-white':'bg-gray-100'}">Absent</button>
+        <button onclick="markAtt('${esc(cls)}','${date}','${s.id}','L')" class="px-3 py-1 rounded-lg text-xs font-bold ${status==='L'?'bg-amber-500 text-white':'bg-gray-100'}">Leave</button>
       </td>
     </tr>`;
   }).join('') || `<tr><td colspan="3" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
   return card(`
-    <h2 class="text-xl font-bold text-[var(--navy)] mb-4">📅 Attendance — Class ${esc(teacher.cls)}</h2>
+    <h2 class="text-xl font-bold text-[var(--navy)] mb-4">📅 Attendance — Class ${esc(cls)}</h2>
+    ${teacherPickerHtml('att', classes, cls)}
     <div class="mb-4"><label class="font-bold text-sm mr-2">Date:</label>
       <input id="attDate" type="date" value="${date}" onchange="render()" class="border rounded-lg px-3 py-2"></div>
     <div class="overflow-x-auto">
@@ -2459,8 +2719,17 @@ function tAttendance(teacher){
     </div>
   `);
 }
+function tStudents(teacher){
+  const classes = teacherClasses(teacher);
+  if(!classes.length) return noAssignCard(teacher,'students');
+  const cls = teacherPick('stu', classes);
+  return `${classes.length>1?card(teacherPickerHtml('stu', classes, cls)):''}${studentManagerCard(cls)}`;
+}
 function tProgress(teacher){
-  const students = DB.students.filter(s=>s.cls===teacher.cls);
+  const classes = teacherClasses(teacher);
+  if(!classes.length) return noAssignCard(teacher,'progress');
+  const cls = teacherPick('prog', classes);
+  const students = DB.students.filter(s=>s.cls===cls);
   const rows = students.map(s=>{
     const pct = computeOverallPct(s);
     const result = pct>=(DB.config.passPercent||40)?'PASS':'FAIL';
@@ -2474,7 +2743,8 @@ function tProgress(teacher){
     </tr>`;
   }).join('') || `<tr><td colspan="5" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
   return `${card(`
-    <h2 class="text-xl font-bold text-[var(--navy)] mb-4">📈 Student Progress — Class ${esc(teacher.cls)}</h2>
+    <h2 class="text-xl font-bold text-[var(--navy)] mb-4">📈 Student Progress — Class ${esc(cls)}</h2>
+    ${teacherPickerHtml('prog', classes, cls)}
     <div class="overflow-x-auto">
     <table class="w-full text-sm">
       <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>%</th><th>Result</th><th>Action</th></tr></thead>
@@ -2484,21 +2754,29 @@ function tProgress(teacher){
   `)}<div id="marksheetPreview" class="mt-5"></div>`;
 }
 function markAtt(cls,date,studentId,status){
+  const ct = curTeacher();
+  if(ct && !attendanceClassesFor(ct).includes(cls)){ alert('The Headmaster has not made you attendance in-charge of Class '+cls+'.'); render(); return; }
   const key = `${cls}|${date}`;
   if(!DB.attendance[key]) DB.attendance[key]={};
   DB.attendance[key][studentId]=status;
   saveDB(); render();
 }
 function tMarksEntry(teacher){
-  const students = DB.students.filter(s=>s.cls===teacher.cls);
-  const subject = document.getElementById('meSubject')?.value || DB.config.subjects[0];
+  const classes = teacherClasses(teacher);
+  if(!classes.length) return noAssignCard(teacher,'marks');
+  const cls = teacherPick('marks', classes);
+  const subjects = teacherSubjectsIn(teacher, cls);
+  if(!subjects.length) return noAssignCard(teacher,'marks');
+  const students = DB.students.filter(s=>s.cls===cls);
+  const subSel = document.getElementById('meSubject')?.value;
+  const subject = subjects.includes(subSel) ? subSel : subjects[0];
   const exam = document.getElementById('meExam')?.value || 'pt1';
   const rows = students.map(s=>{
     const rec = (DB.marks[s.id]||{})[subject]||{};
     const val = rec[exam] ?? '';
     return `<tr class="border-b">
       <td class="py-2">${esc(s.roll)}</td><td>${esc(s.name)}</td>
-      <td><input type="number" min="0" max="100" value="${val}" onchange="setMark('${s.id}','${subject}','${exam}',this.value)" class="border rounded-lg px-2 py-1 w-24"></td>
+      <td><input type="number" min="0" max="100" value="${val}" onchange="setMark('${s.id}','${esc(subject)}','${exam}',this.value)" class="border rounded-lg px-2 py-1 w-24"></td>
       <td>${(function(){
         const m=(DB.marks[s.id]||{})[subject]||{};
         const enteredKeys = EXAM_KEYS.filter(k=>entered(m,k));
@@ -2511,15 +2789,17 @@ function tMarksEntry(teacher){
     </tr>`;
   }).join('') || `<tr><td colspan="4" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
   return card(`
-    <h2 class="text-xl font-bold text-[var(--navy)] mb-4">✏️ Marks Entry — Class ${esc(teacher.cls)}</h2>
+    <h2 class="text-xl font-bold text-[var(--navy)] mb-4">✏️ Marks Entry — Class ${esc(cls)}</h2>
+    ${teacherPickerHtml('marks', classes, cls)}
     <div class="flex flex-wrap gap-3 mb-4">
       <select id="meSubject" onchange="render()" class="border rounded-lg px-3 py-2">
-        ${DB.config.subjects.map(s=>`<option ${s===subject?'selected':''}>${esc(s)}</option>`).join('')}
+        ${subjects.map(s=>`<option ${s===subject?'selected':''}>${esc(s)}</option>`).join('')}
       </select>
       <select id="meExam" onchange="render()" class="border rounded-lg px-3 py-2">
         ${EXAMS.map(e=>`<option value="${e.key}" ${e.key===exam?'selected':''}>${e.label}</option>`).join('')}
       </select>
     </div>
+    ${subjects.length>1?`<p class="text-xs text-gray-500 mb-3">You teach: ${subjects.map(esc).join(', ')} in this class.</p>`:''}
     <div class="overflow-x-auto">
     <table class="w-full text-sm">
       <thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th><th>Marks (/100)</th><th>Subject Total (auto)</th></tr></thead>
@@ -2935,8 +3215,8 @@ function renderSalarySlipCard(t, month){
     <div class="p-5 space-y-4">
       <div class="ms-info-box grid grid-cols-2 gap-2">
         <div><b>Staff:</b> ${esc(t.name)}</div>
-        <div><b>Role:</b> ${esc(t.subject)} Teacher</div>
-        <div><b>Class:</b> ${esc(t.cls)}</div>
+        <div><b>Role:</b> ${t.isHM?'Headmaster':esc(teacherSubjectText(t))+' Teacher'}</div>
+        <div><b>Class:</b> ${t.isHM?'—':esc(teacherClassText(t))}</div>
         <div><b>Month:</b> ${monthLabel(month)}</div>
         <div><b>Due Date:</b> ${due}</div>
       </div>
@@ -3252,6 +3532,7 @@ function renderParentFees(stu){
    ============================================================ */
 function renderHomeworkList(cls, opts={}){
   const list = DB.homework.filter(h=>h.cls===cls).sort((a,b)=>b.dueDate.localeCompare(a.dueDate));
+  const byName = h=>{ const t=DB.teachers.find(x=>x.id===h.teacherId); return t?` • By ${esc(t.name)}`:''; };
   return list.map(h=>`
     <div class="ann-card">
       ${annDateBox(h.dueDate)}
@@ -3261,8 +3542,8 @@ function renderHomeworkList(cls, opts={}){
           <span class="ann-badge ann-badge-general">${esc(h.subject)}</span>
         </div>
         <p class="text-sm text-gray-700">${esc(h.description)}</p>
-        <p class="text-xs text-gray-500 mt-1">Assigned: ${h.dateAssigned} • Due: ${h.dueDate}</p>
-        ${opts.manage?`<button onclick="deleteHomework('${h.id}')" class="text-red-600 text-xs font-bold mt-2">🗑️ Delete</button>`:''}
+        <p class="text-xs text-gray-500 mt-1">Assigned: ${h.dateAssigned} • Due: ${h.dueDate}${byName(h)}</p>
+        ${(opts.manage && (!opts.canDelete || opts.canDelete(h)))?`<button onclick="deleteHomework('${h.id}')" class="text-red-600 text-xs font-bold mt-2">🗑️ Delete</button>`:''}
       </div>
     </div>`).join('') || '<p class="text-gray-400 text-sm">No homework posted yet.</p>';
 }
@@ -3271,20 +3552,34 @@ function addHomework(cls){
   const title = document.getElementById('hwTitle').value.trim();
   const description = document.getElementById('hwDesc').value.trim();
   const dueDate = document.getElementById('hwDue').value;
+  const ct = curTeacher();
+  if(ct && !teacherSubjectsIn(ct, cls).includes(subject)){ alert('The Headmaster has not assigned you '+subject+' in Class '+cls+'.'); return; }
   if(!title || !dueDate){ alert('Please fill in the title and due date.'); return; }
   DB.homework.push({id:uid(), cls, subject, title, description, dueDate, dateAssigned: todayISO(), teacherId: SESSION.teacherId});
   saveDB(); render();
 }
-function deleteHomework(id){ if(confirm('Delete this homework?')){ DB.homework = DB.homework.filter(h=>h.id!==id); saveDB(); render(); } }
+function deleteHomework(id){
+  const h = DB.homework.find(x=>x.id===id); if(!h) return;
+  const ct = curTeacher();
+  if(ct && !teacherSubjectsIn(ct, h.cls).includes(h.subject)){ alert('You can only delete homework of the subjects the Headmaster assigned to you.'); return; }
+  if(confirm('Delete this homework?')){ DB.homework = DB.homework.filter(x=>x.id!==id); saveDB(); render(); }
+}
 function tHomework(teacher){
-  const subject = document.getElementById('hwSubject')?.value || subjectsForClass(teacher.cls)[0];
+  const classes = teacherClasses(teacher);
+  if(!classes.length) return noAssignCard(teacher,'homework');
+  const cls = teacherPick('hw', classes);
+  const subjects = teacherSubjectsIn(teacher, cls);
+  if(!subjects.length) return noAssignCard(teacher,'homework');
+  const subSel = document.getElementById('hwSubject')?.value;
+  const subject = subjects.includes(subSel) ? subSel : subjects[0];
   return `
   <div class="space-y-5">
     ${card(`
-      <h2 class="text-xl font-bold text-[var(--navy)] mb-4">📚 Assign Homework — Class ${esc(teacher.cls)}</h2>
+      <h2 class="text-xl font-bold text-[var(--navy)] mb-4">📚 Assign Homework — Class ${esc(cls)}</h2>
+      ${teacherPickerHtml('hw', classes, cls)}
       <div class="grid md:grid-cols-2 gap-4">
         <div><label class="block text-sm font-bold mb-1">Subject</label>
-          <select id="hwSubject" class="w-full border rounded-lg px-3 py-2">${subjectsForClass(teacher.cls).map(s=>`<option ${s===subject?'selected':''}>${esc(s)}</option>`).join('')}</select></div>
+          <select id="hwSubject" class="w-full border rounded-lg px-3 py-2">${subjects.map(s=>`<option ${s===subject?'selected':''}>${esc(s)}</option>`).join('')}</select></div>
         <div><label class="block text-sm font-bold mb-1">Due Date</label>
           <input id="hwDue" type="date" value="${todayISO()}" class="w-full border rounded-lg px-3 py-2"></div>
         <div class="md:col-span-2"><label class="block text-sm font-bold mb-1">Title</label>
@@ -3292,9 +3587,9 @@ function tHomework(teacher){
         <div class="md:col-span-2"><label class="block text-sm font-bold mb-1">Details</label>
           <textarea id="hwDesc" rows="3" placeholder="Instructions for students/parents" class="w-full border rounded-lg px-3 py-2"></textarea></div>
       </div>
-      <button onclick="addHomework('${teacher.cls}')" class="gold-btn rounded-lg px-5 py-2 font-bold mt-4">➕ Post Homework</button>
+      <button onclick="addHomework('${esc(cls)}')" class="gold-btn rounded-lg px-5 py-2 font-bold mt-4">➕ Post Homework</button>
     `)}
-    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-4">📋 Posted Homework</h2><div class="space-y-3">${renderHomeworkList(teacher.cls,{manage:true})}</div>`)}
+    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-4">📋 Posted Homework</h2><div class="space-y-3">${renderHomeworkList(cls,{manage:true, canDelete:h=>subjects.includes(h.subject)})}</div>`)}
   </div>`;
 }
 function hmHomework(){
@@ -3316,10 +3611,10 @@ function renderIdCard(person, role){
   const photo = person.photo ? `<img src="${person.photo}" style="width:100%;height:100%;object-fit:cover;">` : `<span style="font-size:20pt;">👤</span>`;
   const logo = cfg.logo ? `<img src="${cfg.logo}" style="width:100%;height:100%;object-fit:cover;">` : '🎓';
   const idNo = isStu ? `STU-${esc(person.roll)}-${esc(person.cls)}` : `STF-${esc(String(person.id).slice(-6).toUpperCase())}`;
-  const line2 = isStu ? `Class ${esc(person.cls)}` : `${esc(person.subject)} · Class ${esc(person.cls)}`;
+  const line2 = isStu ? `Class ${esc(person.cls)}` : `${esc(teacherSubjectText(person))} · Class ${esc(teacherClassText(person))}`;
   const rows = isStu
     ? [['ID No',idNo],['Father',person.father||'-'],['Roll No',person.roll],['Session',cfg.year]]
-    : [['ID No',idNo],['Subject',person.subject],['Class',person.cls],['Session',cfg.year]];
+    : [['ID No',idNo],['Subject',teacherSubjectText(person)],['Class',teacherClassText(person)],['Session',cfg.year]];
   const rowsHtml = rows.map(r=>`<div style="display:flex;font-size:6.3pt;line-height:1.6;"><b style="width:12.5mm;flex:none;color:var(--navy);">${r[0]}</b><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(r[1])}</span></div>`).join('');
   const card = `
   <div id="idCard" data-fname="${esc(person.name)}" style="width:85.6mm;height:54mm;box-sizing:border-box;background:#fbfbf9;border-radius:3mm;overflow:hidden;display:flex;font-family:'Trebuchet MS','Segoe UI',sans-serif;border:0.3mm solid #dcdfe8;color:#1a1a2e;">
@@ -3356,7 +3651,7 @@ function hmIdCards(){
     const students = DB.students.filter(s=>s.cls===cls);
     rows = students.map(s=>`<tr class="border-b"><td class="py-2">${esc(s.roll)}</td><td>${esc(s.name)}</td><td><button onclick="viewIdCard('${s.id}','student')" class="text-[var(--navy)] text-sm font-bold">🪪 Generate</button></td></tr>`).join('') || `<tr><td colspan="3" class="text-center text-gray-400 py-4">No students in this class.</td></tr>`;
   } else {
-    rows = DB.teachers.map(t=>`<tr class="border-b"><td class="py-2">${esc(t.name)}</td><td>${esc(t.subject)} (${esc(t.cls)})</td><td><button onclick="viewIdCard('${t.id}','teacher')" class="text-[var(--navy)] text-sm font-bold">🪪 Generate</button></td></tr>`).join('') || `<tr><td colspan="3" class="text-center text-gray-400 py-4">No teachers yet.</td></tr>`;
+    rows = DB.teachers.map(t=>`<tr class="border-b"><td class="py-2">${esc(t.name)}</td><td>${esc(teacherLabel(t))}</td><td><button onclick="viewIdCard('${t.id}','teacher')" class="text-[var(--navy)] text-sm font-bold">🪪 Generate</button></td></tr>`).join('') || `<tr><td colspan="3" class="text-center text-gray-400 py-4">No teachers yet.</td></tr>`;
   }
   return `
   <div class="space-y-5">
@@ -3405,7 +3700,7 @@ function renderStaffDirectory(){
   const tCards = DB.teachers.map(t=>`
     <div class="flex items-center gap-3 border rounded-xl p-3">
       ${t.photo?`<img src="${t.photo}" class="w-14 h-14 rounded-full object-cover">`:'<span class="text-3xl">👤</span>'}
-      <div><div class="font-bold">${esc(t.name)}</div><div class="text-xs text-gray-500">${esc(t.subject)} — Class ${esc(t.cls)}</div></div>
+      <div><div class="font-bold">${esc(t.name)}</div><div class="text-xs text-gray-500">${esc(teacherSubjectText(t))} — Class ${esc(teacherClassText(t))}</div></div>
     </div>`).join('');
   return card(`
     <h2 class="text-xl font-bold text-[var(--navy)] mb-4">👥 Staff Directory</h2>
@@ -3414,6 +3709,8 @@ function renderStaffDirectory(){
 }
 
 function setMark(studentId,subject,exam,value){
+  const ct = curTeacher();
+  if(ct){ const st=DB.students.find(x=>x.id===studentId); if(!st || !teacherSubjectsIn(ct, st.cls).includes(subject)){ alert('The Headmaster has not assigned you this class/subject.'); render(); return; } }
   if(!DB.marks[studentId]) DB.marks[studentId]={};
   if(!DB.marks[studentId][subject]) DB.marks[studentId][subject]={pt1:null,pt2:null,mid:null,final:null};
   const v = String(value).trim();
@@ -3450,7 +3747,7 @@ function renderParent(){
   if(ACTIVE_TAB==='fees') content = renderParentFees(stu);
   if(ACTIVE_TAB==='homework') content = card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-4">📚 Homework — Class ${esc(stu.cls)}</h2><div class="space-y-3">${renderHomeworkList(stu.cls)}</div>`);
   if(ACTIVE_TAB==='announcements') content = renderAnnouncements('parent');
-  if(ACTIVE_TAB==='timetable') content = DB.config.timetable ? renderTimetableCard({}) : card('<p class="text-gray-500 text-center py-10">Timetable not generated yet.</p>');
+  if(ACTIVE_TAB==='timetable') content = `<div class="space-y-5">${classTeachersCard(stu.cls)}${DB.config.timetable ? renderTimetableCard({}) : card('<p class="text-gray-500 text-center py-10">Timetable not generated yet.</p>')}</div>`;
   if(ACTIVE_TAB==='idcard') content = pIdCard(stu);
   if(ACTIVE_TAB==='certificates') content = renderParentCertificates(stu);
   if(ACTIVE_TAB==='staff') content = renderStaffDirectory();
@@ -3709,11 +4006,363 @@ function renderParentCertificates(stu){
   </div>`;
 }
 
+
+/* ============================================================
+   SCHOOL OWNER — overall finance + total students, and the owner's Gmail holds the school's Google Drive file.
+   The Headmaster still runs the school (students, fees, salary entry…), teachers and parents are unchanged.
+   The Owner views everything but edits nothing, so records can only be changed by the people who manage them.
+   ============================================================ */
+function ownerGmail(){ return (DB.config.ownerAccount && DB.config.ownerAccount.gmail) || ''; }
+function ownerAccountExists(){ const o=DB.config.ownerAccount; return !!(o && o.name && o.password); }
+function ownerLoginFields(){
+  if(!ownerAccountExists() && DRIVE_FILE_ID && DRIVE_LOAD.ok===false) return `<p class="text-sm text-gray-600">Owner login will appear as soon as this school's data loads.</p>`;
+  if(!ownerAccountExists()){
+    return `<p class="text-xs text-gray-500 mb-3">First time here — create the School Owner login. The Owner's Gmail will hold this school's Google Drive data.</p>
+      <label class="block text-sm font-bold mb-1">Owner Name</label>
+      <input id="owNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Haji Abdul Rehman">
+      <label class="block text-sm font-bold mb-1">Create Password</label>
+      <input id="owNewPass" type="password" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="Choose a password">
+      <label class="block text-sm font-bold mb-1">Confirm Password</label>
+      <input id="owNewPass2" type="password" class="w-full border rounded-lg px-3 py-2" placeholder="Re-enter password">`;
+  }
+  return `<label class="block text-sm font-bold mb-1">Owner Name</label>
+    <input id="owName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="Enter owner name">
+    <label class="block text-sm font-bold mb-1">Password</label>
+    <input id="owPass" type="password" class="w-full border rounded-lg px-3 py-2" placeholder="Enter password">`;
+}
+function ownerDoLogin(showErr){
+  if(!ownerAccountExists()){
+    if(DRIVE_FILE_ID && DRIVE_LOAD.ok===false){ showErr("This school's data has not loaded yet, so the Owner account can't be created. Press “Try again” above."); return; }
+    const name=document.getElementById('owNewName').value.trim(), p1=document.getElementById('owNewPass').value, p2=document.getElementById('owNewPass2').value;
+    if(!name || !p1){ showErr('Please enter the owner name and a password.'); return; }
+    if(p1.length<4){ showErr('Password should be at least 4 characters.'); return; }
+    if(p1!==p2){ showErr('Passwords do not match.'); return; }
+    DB.config.ownerAccount = {name, password:p1, gmail:(typeof driveConnectedEmail!=='undefined' && driveConnectedEmail)||''};
+    saveDB(); setSession({role:'owner'}); ACTIVE_TAB='dashboard'; render(); return;
+  }
+  const name=document.getElementById('owName').value.trim(), pass=document.getElementById('owPass').value, o=DB.config.ownerAccount;
+  if(name.toLowerCase()===String(o.name).toLowerCase() && pass===o.password){ setSession({role:'owner'}); ACTIVE_TAB='dashboard'; render(); }
+  else showErr('Incorrect owner name or password.');
+}
+const OW_TABS = [
+  {key:'dashboard', label:'Dashboard', icon:'📈'},
+  {key:'finance', label:'Finance', icon:'💰'},
+  {key:'students', label:'Students', icon:'🎒'},
+  {key:'attendance', label:'Attendance', icon:'🗓️'},
+  {key:'results', label:'Results & Positions', icon:'🏆'},
+  {key:'staff', label:'Staff & Salary', icon:'👩‍🏫'},
+  {key:'cloudsync', label:'Cloud Sync', icon:'☁️'},
+  {key:'account', label:'My Account', icon:'👤'},
+];
+/* One pass over fees + salaries -> every number the Owner screens need (read-only: nothing is saved here). */
+function ownerFinance(){
+  const cm = currentMonthKey();
+  const dates = DB.students.map(s=>s.admissionDate||schoolYearStart()).concat(DB.teachers.map(t=>t.joinDate||schoolYearStart()));
+  const from = dates.length ? dates.slice().sort()[0] : schoolYearStart();
+  const months = monthsRange(from, cm);
+  const perMonth = {}; months.forEach(m=>perMonth[m]={feeBilled:0,feeIn:0,salBilled:0,salOut:0});
+  const perClass = {}; (DB.config.classes||[]).forEach(c=>perClass[c]={students:0,billed:0,paid:0});
+  let feeBilled=0, feeIn=0, salBilled=0, salOut=0;
+  DB.students.forEach(s=>{
+    const sum = feeSummary(s); feeBilled+=sum.totalBilled; feeIn+=sum.totalPaid;
+    const pc = perClass[s.cls] || (perClass[s.cls]={students:0,billed:0,paid:0});
+    pc.students++; pc.billed+=sum.totalBilled; pc.paid+=sum.totalPaid;
+    Object.entries(DB.fees[s.id]||{}).forEach(([mo,r])=>{ if(perMonth[mo] && feeApplies(s,mo)){ perMonth[mo].feeBilled+=recAmount(r); perMonth[mo].feeIn+=recPaid(r); } });
+  });
+  DB.teachers.forEach(t=>{
+    const sum = salarySummary(t); salBilled+=sum.totalBilled; salOut+=sum.totalPaid;
+    Object.entries(DB.salaries[t.id]||{}).forEach(([mo,r])=>{ if(perMonth[mo] && salApplies(t,mo)){ perMonth[mo].salBilled+=recAmount(r); perMonth[mo].salOut+=recPaid(r); } });
+  });
+  if(hmSalaryActive()){
+    const hs=hmStaff(), sum=salarySummary(hs); salBilled+=sum.totalBilled; salOut+=sum.totalPaid;
+    Object.entries(DB.salaries['__hm']||{}).forEach(([mo,r])=>{ if(perMonth[mo]){ perMonth[mo].salBilled+=recAmount(r); perMonth[mo].salOut+=recPaid(r); } });
+  }
+  return {cm, months, perMonth, perClass, feeBilled, feeIn, feeDue:feeBilled-feeIn, salBilled, salOut, salDue:salBilled-salOut, net:feeIn-salOut};
+}
+function renderOwner(){
+  if(!ACTIVE_TAB || !OW_TABS.find(t=>t.key===ACTIVE_TAB)) ACTIVE_TAB='dashboard';
+  let content='';
+  if(ACTIVE_TAB==='dashboard') content = ownerDashboard();
+  if(ACTIVE_TAB==='finance') content = ownerFinanceTab();
+  if(ACTIVE_TAB==='students') content = ownerStudents();
+  if(ACTIVE_TAB==='attendance') content = ownerAttendance();
+  if(ACTIVE_TAB==='results') content = ownerResults();
+  if(ACTIVE_TAB==='staff') content = ownerStaff();
+  if(ACTIVE_TAB==='cloudsync') content = renderCloudSyncPanel();
+  if(ACTIVE_TAB==='account') content = ownerAccountCard();
+  document.getElementById('app').innerHTML = shell('School Owner', OW_TABS, ACTIVE_TAB, content);
+}
+function ownerStat(val,label,cls){ return `<div class="doc-frame p-4 text-center"><div class="text-2xl md:text-3xl font-bold ${cls||'text-[var(--navy)]'}">${val}</div><div class="text-xs text-gray-500 mt-1">${label}</div></div>`; }
+function ownerDashboard(){
+  const f = ownerFinance(), m = f.perMonth[f.cm] || {feeBilled:0,feeIn:0,salBilled:0,salOut:0};
+  return `<div class="space-y-5">
+    <div class="grid sm:grid-cols-2 md:grid-cols-4 gap-4">
+      ${ownerStat(DB.students.length,'🎒 Total Registered Students')}
+      ${ownerStat(DB.teachers.length,'👩‍🏫 Total Teachers')}
+      ${ownerStat((DB.config.classes||[]).length,'🏫 Total Classes')}
+      ${ownerStat(rs(f.net),'📊 Net (Fees collected − Salary paid)', f.net>=0?'text-green-600':'text-red-600')}
+    </div>
+    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-3">💼 Overall Finances (all-time)</h2>
+      <div class="grid sm:grid-cols-2 gap-4">
+        <div class="ms-summary-box p-3"><div class="font-bold text-[var(--navy)] mb-2">💰 Student Fees</div>
+          <div class="row"><span>Total Billed</span><span class="font-bold">${rs(f.feeBilled)}</span></div>
+          <div class="row"><span>Total Collected</span><span class="text-green-600 font-bold">${rs(f.feeIn)}</span></div>
+          <div class="row" style="border-bottom:none;"><span>Remaining (Due)</span><span class="${f.feeDue>0?'text-red-600':'text-green-600'} font-bold">${rs(f.feeDue)}</span></div></div>
+        <div class="ms-summary-box p-3"><div class="font-bold text-[var(--navy)] mb-2">🧾 Staff Salary</div>
+          <div class="row"><span>Total Salary</span><span class="font-bold">${rs(f.salBilled)}</span></div>
+          <div class="row"><span>Total Paid</span><span class="text-green-600 font-bold">${rs(f.salOut)}</span></div>
+          <div class="row" style="border-bottom:none;"><span>Remaining (Due)</span><span class="${f.salDue>0?'text-red-600':'text-green-600'} font-bold">${rs(f.salDue)}</span></div></div>
+      </div>`)}
+    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-3">📅 This Month — ${esc(monthLabel(f.cm))}</h2>
+      <div class="grid sm:grid-cols-2 md:grid-cols-4 gap-3">
+        ${ownerStat(rs(m.feeBilled),'Fees billed')}${ownerStat(rs(m.feeIn),'Fees collected','text-green-600')}
+        ${ownerStat(rs(m.salBilled),'Salary due')}${ownerStat(rs(m.salOut),'Salary paid','text-green-600')}
+      </div>`)}
+    ${reportCard()}
+  </div>`;
+}
+function ownerFinanceTab(){
+  const f = ownerFinance();
+  const mrows = f.months.slice().reverse().map(mo=>{ const m=f.perMonth[mo];
+    return `<tr class="border-b"><td class="py-2">${esc(monthLabel(mo))}</td><td>${rs(m.feeBilled)}</td><td class="text-green-600 font-bold">${rs(m.feeIn)}</td><td class="${m.feeBilled-m.feeIn>0?'text-red-600':''}">${rs(m.feeBilled-m.feeIn)}</td><td>${rs(m.salOut)}</td><td class="font-bold ${m.feeIn-m.salOut>=0?'text-green-600':'text-red-600'}">${rs(m.feeIn-m.salOut)}</td></tr>`; }).join('');
+  const crows = Object.entries(f.perClass).filter(([c,v])=>v.students>0).map(([c,v])=>
+    `<tr class="border-b"><td class="py-2">${esc(c)}</td><td>${v.students}</td><td>${rs(v.billed)}</td><td class="text-green-600 font-bold">${rs(v.paid)}</td><td class="${v.billed-v.paid>0?'text-red-600 font-bold':''}">${rs(v.billed-v.paid)}</td></tr>`).join('');
+  return `<div class="space-y-5">
+    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-3">📅 Month-wise Income vs Salary</h2>
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Month</th><th>Fees Billed</th><th>Collected</th><th>Fees Due</th><th>Salary Paid</th><th>Net</th></tr></thead>
+      <tbody>${mrows||'<tr><td colspan="6" class="py-3 text-gray-500">No records yet.</td></tr>'}</tbody>
+      <tfoot><tr class="font-bold"><td class="py-2">Total</td><td>${rs(f.feeBilled)}</td><td class="text-green-600">${rs(f.feeIn)}</td><td>${rs(f.feeDue)}</td><td>${rs(f.salOut)}</td><td class="${f.net>=0?'text-green-600':'text-red-600'}">${rs(f.net)}</td></tr></tfoot></table></div>`)}
+    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-3">🏫 Class-wise Fees</h2>
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Class</th><th>Students</th><th>Billed</th><th>Collected</th><th>Remaining</th></tr></thead>
+      <tbody>${crows||'<tr><td colspan="5" class="py-3 text-gray-500">No students yet.</td></tr>'}</tbody></table></div>`)}
+  </div>`;
+}
+function ownerStudents(){
+  const f = ownerFinance();
+  const sel = (document.getElementById('owClassSel')||{}).value || '';
+  const list = DB.students.filter(s=>!sel || s.cls===sel).slice().sort((a,b)=>String(a.cls).localeCompare(String(b.cls),undefined,{numeric:true})||(Number(a.roll)||0)-(Number(b.roll)||0));
+  const counts = Object.entries(f.perClass).filter(([c,v])=>v.students>0).map(([c,v])=>`<span class="ann-badge bg-gray-100 text-gray-700 mr-1 mb-1 inline-block">${esc(c)}: <b>${v.students}</b></span>`).join('');
+  const rows = list.map(s=>{ const sum=feeSummary(s); return `<tr class="border-b"><td class="py-2">${esc(s.name)}</td><td>${esc(s.father||'')}</td><td>${esc(s.cls)}</td><td>${esc(s.roll)}</td><td>${rs(sum.totalPaid)}</td><td class="${sum.totalDue>0?'text-red-600 font-bold':'text-green-600'}">${rs(sum.totalDue)}</td></tr>`; }).join('');
+  return `<div class="space-y-5">
+    ${card(`<div class="flex flex-wrap items-center gap-4"><div class="text-4xl font-bold text-[var(--navy)]">${DB.students.length}</div><div class="text-sm text-gray-600">Total registered students</div></div><div class="mt-3">${counts}</div>`)}
+    ${card(`<div class="flex flex-wrap items-center gap-3 mb-3"><h2 class="text-xl font-bold text-[var(--navy)]">🎒 Students</h2>
+      <select id="owClassSel" onchange="render()" class="border rounded-lg px-3 py-1 text-sm"><option value="">All classes</option>${(DB.config.classes||[]).concat(Object.keys(f.perClass).filter(c=>!(DB.config.classes||[]).includes(c))).map(c=>`<option ${c===sel?'selected':''}>${esc(c)}</option>`).join('')}</select></div>
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Name</th><th>Father</th><th>Class</th><th>Roll</th><th>Fees Paid</th><th>Remaining</th></tr></thead>
+      <tbody>${rows||'<tr><td colspan="6" class="py-3 text-gray-500">No students.</td></tr>'}</tbody></table></div>`)}
+  </div>`;
+}
+function ownerStaff(){
+  const rows = DB.teachers.map(t=>{ const sum=salarySummary(t); return `<tr class="border-b"><td class="py-2">${esc(t.name)}</td><td>${esc(teacherSubjectText(t))}</td><td>${esc(teacherClassText(t))}</td><td>${rs(t.salary||0)}</td><td>${rs(sum.totalPaid)}</td><td class="${sum.totalDue>0?'text-red-600 font-bold':'text-green-600'}">${rs(sum.totalDue)}</td></tr>`; }).join('');
+  return `<div class="space-y-5">${ownerHmSalaryCard()}` + card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-3">👩‍🏫 Staff & Salary (${DB.teachers.length})</h2>
+    <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Teacher</th><th>Subjects</th><th>Classes</th><th>Monthly Salary</th><th>Paid (all-time)</th><th>Remaining</th></tr></thead>
+    <tbody>${rows||'<tr><td colspan="6" class="py-3 text-gray-500">No teachers yet.</td></tr>'}</tbody></table></div>`) + '</div>';
+}
+function ownerAccountCard(){
+  const o = DB.config.ownerAccount || {};
+  return card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-3">👤 Owner Account</h2>
+    <p class="text-sm text-gray-600 mb-3">Signed in as <b>${esc(o.name||'')}</b>. Your Gmail (below) holds this school's Google Drive data — connect it in <b>Cloud Sync</b>.</p>
+    <div class="bg-gray-100 rounded-lg px-3 py-2 text-sm font-bold mb-4">${esc(driveConnectedEmail||o.gmail||'Not connected yet')}</div>
+    <h3 class="font-bold text-[var(--navy)] mb-2">Change Password</h3>
+    <div class="grid md:grid-cols-3 gap-3">
+      <input id="owCur" type="password" placeholder="Current Password" class="border rounded-lg px-3 py-2">
+      <input id="owN1" type="password" placeholder="New Password" class="border rounded-lg px-3 py-2">
+      <input id="owN2" type="password" placeholder="Confirm New Password" class="border rounded-lg px-3 py-2">
+    </div>
+    <button onclick="ownerChangePassword()" class="navy-btn rounded-lg px-5 py-2 mt-3 font-bold">Change Password</button>
+    <span id="owMsg" class="ml-3 text-sm font-bold hidden"></span>`);
+}
+function ownerChangePassword(){
+  const o=DB.config.ownerAccount, msg=document.getElementById('owMsg'); msg.classList.remove('hidden');
+  const bad=t=>{ msg.textContent=t; msg.className='ml-3 text-sm font-bold text-red-600'; };
+  const cur=document.getElementById('owCur').value, n1=document.getElementById('owN1').value, n2=document.getElementById('owN2').value;
+  if(cur!==o.password) return bad('Current password is incorrect.');
+  if(!n1||n1.length<4) return bad('New password should be at least 4 characters.');
+  if(n1!==n2) return bad('New passwords do not match.');
+  o.password=n1; saveDB(); msg.textContent='Password changed!'; msg.className='ml-3 text-sm font-bold text-green-600';
+}
+
+
+/* ---------- Headmaster's own salary: the OWNER decides it (amount, joining month, payments); the Headmaster only sees it ---------- */
+function hmSalaryActive(){ return (Number(DB.config.hmSalary)||0)>0 || !!(DB.salaries && DB.salaries['__hm'] && Object.keys(DB.salaries['__hm']).length); }
+function hmStaff(){ const hm=DB.config.headmasterAccount||{}; return {id:'__hm', isHM:true, name:hm.name||'Headmaster', subject:'Headmaster', cls:'', salary:Number(DB.config.hmSalary)||0, joinDate:DB.config.hmJoinDate||''}; }
+function viewHmSalarySlip(teacherId, month){
+  const box = document.getElementById('salarySlipPreview'); if(!box) return;
+  box.innerHTML = `<div class="flex justify-end mb-2 no-print"><button onclick="printEl('salarySlipCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold">🖨️ Print</button> <button onclick="jpgEl('salarySlipCard')" class="gold-btn rounded-lg px-4 py-1.5 text-sm font-bold ml-2" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>` + renderSalarySlipCard(hmStaff(), month);
+}
+function hmMySalary(){
+  if(!hmSalaryActive()) return card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-2">💼 My Salary</h2><p class="text-sm text-gray-600">Your salary has not been set yet. The School Owner decides and records the Headmaster's salary.</p>`);
+  return renderTeacherSalary(hmStaff()).replace(/viewSalarySlip\(/g,'viewHmSalarySlip(').replace('💰 My Salary','💼 My Salary (set by the School Owner)');
+}
+function ownerSetHmSalary(){
+  const v=Number(document.getElementById('owHmSal').value)||0, j=document.getElementById('owHmJoin').value||'';
+  if(v<0){ alert('Salary cannot be negative.'); return; }
+  DB.config.hmSalary=v; DB.config.hmJoinDate=j; saveDB(); render();
+}
+function ownerHmSalaryCard(){
+  const hs=hmStaff(), month=(document.getElementById('owHmMonth')||{}).value || currentMonthKey();
+  const startM=(hs.joinDate||schoolYearStart()).slice(0,7);
+  const applies = month>=startM && hs.salary>0;
+  let body='';
+  if(applies){
+    const rec=recSync(ensureSalaryRecord('__hm', month, hs.salary));
+    body=`<div class="flex flex-wrap gap-3 items-end mt-3">
+      <div><label class="block text-xs font-bold mb-1">Month</label><input id="owHmMonth" type="month" value="${month}" onchange="render()" class="border rounded-lg px-3 py-2"></div>
+      <div><label class="block text-xs font-bold mb-1">Salary this month</label><input type="number" min="0" value="${recAmount(rec)}" onchange="setSalaryAmount('__hm','${month}',this.value)" class="border rounded-lg px-2 py-2 w-28"></div>
+      <div><label class="block text-xs font-bold mb-1">Paid so far</label><input type="number" min="0" value="${recPaid(rec)}" onchange="setSalaryReceived('__hm','${month}',this.value)" class="border rounded-lg px-2 py-2 w-28"></div>
+      <div class="text-sm pb-2">Balance: <b class="${recBalance(rec)>0?'text-red-600':'text-green-600'}">${rs(recBalance(rec))}</b> ${recBadge(rec)}</div>
+      <button onclick="setSalaryStatus('__hm','${month}','Paid')" class="px-3 py-2 rounded-lg text-xs font-bold bg-green-600 text-white">Pay in full</button>
+      <button onclick="setSalaryStatus('__hm','${month}','Unpaid')" class="px-3 py-2 rounded-lg text-xs font-bold bg-gray-100">Clear</button>
+    </div>`;
+  } else {
+    body=`<div class="mt-3 text-sm text-amber-700">${hs.salary>0?`Pick a month from ${esc(monthLabel(startM))} onward.`:'Set the monthly salary and joining date above to start the record.'} <input id="owHmMonth" type="month" value="${month}" onchange="render()" class="border rounded-lg px-2 py-1 ml-2"></div>`;
+  }
+  const sum = hmSalaryActive()? salarySummary(hs) : {totalBilled:0,totalPaid:0,totalDue:0};
+  return card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-1">💼 Headmaster Salary — ${esc(hs.name)}</h2>
+    <p class="text-xs text-gray-500 mb-3">You (the Owner) decide and pay this. The Headmaster sees the record in his “My Salary” tab but cannot change it.</p>
+    <div class="flex flex-wrap gap-3 items-end">
+      <div><label class="block text-xs font-bold mb-1">Monthly Salary (Rs.)</label><input id="owHmSal" type="number" min="0" value="${hs.salary}" class="border rounded-lg px-2 py-2 w-32"></div>
+      <div><label class="block text-xs font-bold mb-1">Joining Date</label><input id="owHmJoin" type="date" value="${esc(hs.joinDate)}" class="border rounded-lg px-2 py-2"></div>
+      <button onclick="ownerSetHmSalary()" class="navy-btn rounded-lg px-4 py-2 font-bold">Save</button>
+    </div>
+    <div class="grid sm:grid-cols-3 gap-3 mt-4">
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Total Salary</div><div class="font-bold">${rs(sum.totalBilled)}</div></div>
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Paid</div><div class="font-bold text-green-600">${rs(sum.totalPaid)}</div></div>
+      <div class="ms-summary-box p-3 text-center"><div class="text-xs text-gray-500">Due</div><div class="font-bold ${sum.totalDue>0?'text-red-600':'text-green-600'}">${rs(sum.totalDue)}</div></div>
+    </div>${body}`);
+}
+
+/* ---------- Attendance (students per class, individual students, teachers) ---------- */
+function attOK(date, month){ return !month || String(date).startsWith(month); }
+function classAttStats(month){
+  const out={};
+  Object.keys(DB.attendance||{}).forEach(k=>{
+    const i=k.indexOf('|'); if(i<0) return; const cls=k.slice(0,i), date=k.slice(i+1); if(!attOK(date,month)) return;
+    const o=out[cls]||(out[cls]={P:0,A:0,L:0,days:0}); o.days++;
+    Object.values(DB.attendance[k]).forEach(v=>{ if(v==='P'||v==='A'||v==='L') o[v]++; });
+  });
+  return out;
+}
+function studentAttStats(stu, month){
+  const o={P:0,A:0,L:0};
+  Object.keys(DB.attendance||{}).forEach(k=>{ if(!k.startsWith(stu.cls+'|')) return; if(!attOK(k.slice(stu.cls.length+1),month)) return; const v=DB.attendance[k][stu.id]; if(v&&o[v]!=null) o[v]++; });
+  return o;
+}
+function teacherAttStats(t, month){
+  const o={P:0,A:0,L:0};
+  Object.keys(DB.teacherAttendance||{}).forEach(d=>{ if(!attOK(d,month)) return; const v=(DB.teacherAttendance[d]||{})[t.id]; if(v&&o[v]!=null) o[v]++; });
+  return o;
+}
+function attPct(o){ const n=o.P+o.A+o.L; return n? Math.round(o.P/n*100) : null; }
+function attCell(o){ const pc=attPct(o); return `<td>${o.P}</td><td>${o.A}</td><td>${o.L}</td><td class="font-bold ${pc==null?'text-gray-400':pc>=85?'text-green-600':pc>=70?'text-amber-600':'text-red-600'}">${pc==null?'—':pc+'%'}</td>`; }
+function ownerAttendance(){
+  const monthEl=document.getElementById('owAttMonth'); const month = monthEl ? monthEl.value : currentMonthKey();
+  const clsList=(DB.config.classes||[]).filter(c=>DB.students.some(s=>s.cls===c));
+  const selCls=(document.getElementById('owAttClass')||{}).value || clsList[0] || '';
+  const cs=classAttStats(month);
+  const crow=clsList.map(c=>{ const o=cs[c]||{P:0,A:0,L:0,days:0}; return `<tr class="border-b"><td class="py-2">${esc(c)}</td><td>${DB.students.filter(s=>s.cls===c).length}</td><td>${o.days}</td>${attCell(o)}</tr>`; }).join('');
+  const srow=DB.students.filter(s=>s.cls===selCls).sort((a,b)=>(Number(a.roll)||0)-(Number(b.roll)||0)).map(s=>{ const o=studentAttStats(s,month); return `<tr class="border-b"><td class="py-2">${esc(s.roll)}</td><td>${esc(s.name)}</td>${attCell(o)}</tr>`; }).join('');
+  const trow=DB.teachers.map(t=>{ const o=teacherAttStats(t,month); return `<tr class="border-b"><td class="py-2">${esc(t.name)}</td>${attCell(o)}</tr>`; }).join('');
+  const today=todayISO(); let tp=0,ta=0,tl=0; Object.keys(DB.attendance||{}).forEach(k=>{ if(k.endsWith('|'+today)) Object.values(DB.attendance[k]).forEach(v=>{ if(v==='P')tp++; else if(v==='A')ta++; else if(v==='L')tl++; }); });
+  const th='<th>Present</th><th>Absent</th><th>Leave</th><th>%</th>';
+  return `<div class="space-y-5">
+    ${card(`<div class="flex flex-wrap items-end gap-4"><div><label class="block text-xs font-bold mb-1">Month (clear = all time)</label><input id="owAttMonth" type="month" value="${esc(month)}" onchange="render()" class="border rounded-lg px-3 py-2"></div>
+      <div class="text-sm text-gray-600">Today: <b class="text-green-600">${tp} present</b> · <b class="text-red-600">${ta} absent</b> · <b>${tl} leave</b></div></div>`)}
+    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-3">🏫 Class-wise Student Attendance</h2><div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Class</th><th>Students</th><th>Days marked</th>${th}</tr></thead><tbody>${crow||'<tr><td colspan="7" class="py-3 text-gray-500">No attendance yet.</td></tr>'}</tbody></table></div>`)}
+    ${card(`<div class="flex flex-wrap items-center gap-3 mb-3"><h2 class="text-xl font-bold text-[var(--navy)]">🎒 Student-wise</h2><select id="owAttClass" onchange="render()" class="border rounded-lg px-3 py-1 text-sm">${clsList.map(c=>`<option ${c===selCls?'selected':''}>${esc(c)}</option>`).join('')}</select></div>
+      <div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Roll</th><th>Name</th>${th}</tr></thead><tbody>${srow||'<tr><td colspan="6" class="py-3 text-gray-500">No students.</td></tr>'}</tbody></table></div>`)}
+    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-3">👩‍🏫 Teacher Attendance</h2><div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Teacher</th>${th}</tr></thead><tbody>${trow||'<tr><td colspan="5" class="py-3 text-gray-500">No teachers.</td></tr>'}</tbody></table></div>`)}
+  </div>`;
+}
+
+/* ---------- Results: class positions + overall class performance ---------- */
+function owOrd(n){ const v=n%100; return n+((v>=11&&v<=13)?'th':({1:'st',2:'nd',3:'rd'}[n%10]||'th')); }
+function classResults(cls){
+  const pass=DB.config.passPercent||40;
+  const all=DB.students.filter(s=>s.cls===cls).map(s=>({s, pct:computeOverallPct(s)}));
+  const ranked=all.filter(x=>x.pct>0).sort((a,b)=>b.pct-a.pct);
+  let last=null,pos=0; ranked.forEach((x,i)=>{ if(last===null||x.pct!==last){ pos=i+1; last=x.pct; } x.pos=pos; });
+  const n=ranked.length, passed=ranked.filter(x=>x.pct>=pass).length;
+  return {cls, total:all.length, withMarks:n, ranked, unranked:all.filter(x=>x.pct<=0),
+    avg:n? ranked.reduce((a,x)=>a+x.pct,0)/n : 0, passed, failed:n-passed, passRate:n? Math.round(passed/n*100):0,
+    top:n?ranked[0].pct:0, low:n?ranked[n-1].pct:0, pass};
+}
+function ownerResults(){
+  const sel=(document.getElementById('owResClass')||{}).value||'';
+  const classes=(DB.config.classes||[]).filter(c=>DB.students.some(s=>s.cls===c));
+  const rs_=classes.map(classResults);
+  const srow=rs_.map(r=>`<tr class="border-b"><td class="py-2 font-bold">${esc(r.cls)}</td><td>${r.total}</td><td>${r.withMarks}</td><td>${r.avg.toFixed(1)}%</td><td class="text-green-600">${r.passed}</td><td class="text-red-600">${r.failed}</td><td class="font-bold">${r.passRate}%</td><td>${r.withMarks?esc(r.ranked[0].s.name)+' ('+r.top.toFixed(1)+'%)':'—'}</td>
+    <td style="min-width:90px"><div style="background:#e5e7eb;border-radius:6px;height:10px"><div style="background:var(--navy);width:${Math.min(100,r.avg).toFixed(0)}%;height:10px;border-radius:6px"></div></div></td></tr>`).join('');
+  const show=sel? rs_.filter(r=>r.cls===sel) : rs_;
+  const lists=show.map(r=>`<div class="mb-5"><h3 class="font-bold text-[var(--navy)] mb-2">${esc(r.cls)} — class positions</h3><div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Position</th><th>Roll</th><th>Name</th><th>%</th><th>Result</th></tr></thead><tbody>
+    ${r.ranked.map(x=>`<tr class="border-b"><td class="py-2 font-bold">${x.pos<=3?['🥇','🥈','🥉'][x.pos-1]+' ':''}${owOrd(x.pos)}</td><td>${esc(x.s.roll)}</td><td>${esc(x.s.name)}</td><td>${x.pct.toFixed(2)}%</td><td class="font-bold ${x.pct>=r.pass?'text-green-600':'text-red-600'}">${x.pct>=r.pass?'PASS':'FAIL'}</td></tr>`).join('')||'<tr><td colspan="5" class="py-3 text-gray-500">No marks entered yet.</td></tr>'}
+    </tbody></table></div></div>`).join('');
+  return `<div class="space-y-5">
+    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-3">📈 Class Performance (overall)</h2><div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Class</th><th>Students</th><th>With marks</th><th>Average</th><th>Pass</th><th>Fail</th><th>Pass rate</th><th>Topper</th><th>Avg</th></tr></thead><tbody>${srow||'<tr><td colspan="9" class="py-3 text-gray-500">No students yet.</td></tr>'}</tbody></table></div>`)}
+    ${card(`<div class="flex flex-wrap items-center gap-3 mb-3"><h2 class="text-xl font-bold text-[var(--navy)]">🏆 Class-wise Positions</h2><select id="owResClass" onchange="render()" class="border rounded-lg px-3 py-1 text-sm"><option value="">All classes</option>${classes.map(c=>`<option ${c===sel?'selected':''}>${esc(c)}</option>`).join('')}</select></div>${lists||'<p class="text-gray-500 text-sm">No data.</p>'}`)}
+  </div>`;
+}
+
+/* ---------- One single PDF of the whole school record (Owner + Headmaster). Opens a print view -> "Save as PDF". ---------- */
+const REPORT_VERSION='v1';
+function reportCard(){
+  return card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-2">📄 Overall School Report (PDF)</h2>
+    <p class="text-sm text-gray-600 mb-3">One single PDF with students, finance, salaries, attendance, class positions and class performance. Report version <b>${REPORT_VERSION}</b>.</p>
+    <button onclick="openSchoolReport()" class="navy-btn rounded-lg px-5 py-2 font-bold">⬇️ Download Full Report PDF</button>
+    <p class="text-xs text-gray-500 mt-2">A print window opens — choose <b>Save as PDF</b> as the destination and press Save. It is saved on this device.</p>`);
+}
+function schoolReportHtml(){
+  const cfg=DB.config, f=ownerFinance(), who=SESSION&&SESSION.role==='owner'?'School Owner':'Headmaster';
+  const now=new Date(), stamp=now.toLocaleDateString('en-GB')+' '+now.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+  const classes=(cfg.classes||[]).filter(c=>DB.students.some(s=>s.cls===c));
+  const T=(head,rows)=>`<table><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${head.length}">No records.</td></tr>`}</tbody></table>`;
+  const cs=classAttStats(''); 
+  const att=classes.map(c=>{ const o=cs[c]||{P:0,A:0,L:0,days:0}; const pc=attPct(o); return [esc(c),o.days,o.P,o.A,o.L,pc==null?'—':pc+'%']; });
+  const tatt=DB.teachers.map(t=>{ const o=teacherAttStats(t,''); const pc=attPct(o); return [esc(t.name),o.P,o.A,o.L,pc==null?'—':pc+'%']; });
+  const salRows=DB.teachers.map(t=>{ const sm=salarySummary(t); return [esc(t.name),esc(teacherSubjectText(t)),rs(t.salary||0),rs(sm.totalPaid),rs(sm.totalDue)]; });
+  if(hmSalaryActive()){ const hs=hmStaff(), sm=salarySummary(hs); salRows.unshift([esc(hs.name)+' (Headmaster)','—',rs(hs.salary),rs(sm.totalPaid),rs(sm.totalDue)]); }
+  const results=classes.map(classResults);
+  const perf=results.map(r=>[esc(r.cls),r.total,r.withMarks,r.avg.toFixed(1)+'%',r.passed,r.failed,r.passRate+'%',r.withMarks?esc(r.ranked[0].s.name):'—']);
+  const pos=results.map(r=>`<h3>${esc(r.cls)} — Positions</h3>`+T(['Position','Roll','Name','%','Result'],r.ranked.map(x=>[owOrd(x.pos),esc(x.s.roll),esc(x.s.name),x.pct.toFixed(2)+'%',x.pct>=r.pass?'PASS':'FAIL']))).join('');
+  const stuRows=classes.map(c=>{ const v=f.perClass[c]||{students:0,billed:0,paid:0}; return [esc(c),v.students,rs(v.billed),rs(v.paid),rs(v.billed-v.paid)]; });
+  const mrows=f.months.slice().reverse().map(mo=>{ const m=f.perMonth[mo]; return [esc(monthLabel(mo)),rs(m.feeBilled),rs(m.feeIn),rs(m.feeBilled-m.feeIn),rs(m.salOut),rs(m.feeIn-m.salOut)]; });
+  return `<div class="rp">
+    <div class="cover"><div class="t">${esc(cfg.schoolName)}</div><div class="s">OVERALL SCHOOL REPORT</div>
+      <div class="m">Report Version: <b>${REPORT_VERSION}</b> · Academic Year ${esc(cfg.year||'')}<br>Generated ${esc(stamp)} by ${who}</div></div>
+    <h2>1. Summary</h2>
+    ${T(['Registered Students','Teachers','Classes','Fees Collected','Fees Remaining','Salary Paid','Net'],[[DB.students.length,DB.teachers.length,(cfg.classes||[]).length,rs(f.feeIn),rs(f.feeDue),rs(f.salOut),rs(f.net)]])}
+    <h2>2. Students & Fees (class-wise)</h2>${T(['Class','Students','Billed','Collected','Remaining'],stuRows)}
+    <h2>3. Month-wise Income vs Salary</h2>${T(['Month','Fees Billed','Collected','Fees Due','Salary Paid','Net'],mrows)}
+    <h2>4. Staff & Salary</h2>${T(['Name','Subjects','Monthly Salary','Paid (all-time)','Remaining'],salRows)}
+    <h2>5. Attendance</h2><h3>Students (all time)</h3>${T(['Class','Days marked','Present','Absent','Leave','%'],att)}<h3>Teachers (all time)</h3>${T(['Teacher','Present','Absent','Leave','%'],tatt)}
+    <h2>6. Class Performance</h2>${T(['Class','Students','With marks','Average','Pass','Fail','Pass rate','Topper'],perf)}
+    <h2>7. Class-wise Positions</h2>${pos}
+    <div class="foot">${esc(cfg.schoolName)} · School Report ${REPORT_VERSION} · ${esc(stamp)}</div></div>`;
+}
+function openSchoolReport(){
+  const w=window.open('','SchoolReport','width=900,height=1000');
+  if(!w){ alert('Please allow pop-ups for this site to download the PDF.'); return; }
+  const html=schoolReportHtml();
+  const fname=('School-Report-'+REPORT_VERSION+'-'+(DB.config.schoolName||'School')+'-'+todayISO()).replace(/[^\w\-]+/g,'_');
+  w.document.open();
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${fname}</title><style>
+    @page{size:A4;margin:12mm} body{font-family:Arial,Helvetica,sans-serif;color:#111;margin:0;font-size:12px}
+    .bar{position:sticky;top:0;background:#1e3a5f;color:#fff;padding:10px 16px;display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}
+    .bar button{background:#f7c948;border:0;border-radius:8px;padding:8px 18px;font-weight:700;cursor:pointer}
+    .rp{padding:16px 20px}.cover{text-align:center;border-bottom:3px solid #1e3a5f;padding:18px 0;margin-bottom:10px}
+    .cover .t{font-size:26px;font-weight:800;color:#1e3a5f}.cover .s{font-size:15px;letter-spacing:3px;margin:6px 0;color:#b8860b;font-weight:700}.cover .m{font-size:12px;color:#444}
+    h2{font-size:15px;color:#1e3a5f;border-bottom:1px solid #1e3a5f;padding-bottom:3px;margin:18px 0 8px;page-break-after:avoid}h3{font-size:13px;margin:12px 0 6px;page-break-after:avoid}
+    table{width:100%;border-collapse:collapse;margin-bottom:8px}th{background:#1e3a5f;color:#fff;text-align:left;padding:5px 6px;font-size:11px}td{padding:4px 6px;border-bottom:1px solid #ddd}tr{page-break-inside:avoid}
+    .foot{margin-top:18px;border-top:1px solid #999;padding-top:6px;font-size:10px;color:#555;text-align:center}
+    *{-webkit-print-color-adjust:exact;print-color-adjust:exact}@media print{.bar{display:none}}
+  </style></head><body><div class="bar"><span>Choose <b>Save as PDF</b> as destination, then Save. File name: ${fname}.pdf</span><button onclick="window.print()">⬇️ Save as PDF</button></div>${html}</body></html>`);
+  w.document.close();
+}
+
 function render(){
   if(!SESSION){ renderLogin(); return; }
   /* The Headmaster (the paying party) is blocked until approved. Teachers & parents are blocked only by a REAL
      'declined / expired' answer — never by a mere 'could not check', which would lock a whole school out. */
-  if(registryConfigured() && DRIVE_FILE_ID && APPROVAL_STATE.status!=='approved' && (SESSION.role==='headmaster' || APPROVAL_STATE.status==='denied' || APPROVAL_STATE.status==='expired')){
+  if(registryConfigured() && DRIVE_FILE_ID && APPROVAL_STATE.status!=='approved' && (SESSION.role==='headmaster' || SESSION.role==='owner' || APPROVAL_STATE.status==='denied' || APPROVAL_STATE.status==='expired')){
     GATE_SHOWN = true;
     document.getElementById('app').innerHTML = renderApprovalGate();
     return;
@@ -3721,6 +4370,7 @@ function render(){
   if(GATE_SHOWN){ GATE_SHOWN=false; WELCOME_PENDING=true; }   // was waiting, now approved
   if(WELCOME_PENDING){ document.getElementById('app').innerHTML = renderApprovalWelcome(); return; }
   if(SESSION.role==='headmaster') renderHeadmaster();
+  else if(SESSION.role==='owner') renderOwner();
   else if(SESSION.role==='teacher') renderTeacher();
   else if(SESSION.role==='parent') renderParent();
   else { logout(); }
