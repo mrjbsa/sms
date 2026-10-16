@@ -3,7 +3,7 @@
    may be restricted to certain websites. This runs on the server (Vercel), so every device — phone, PC, any network —
    reads the data the same way. It only returns JSON files and never exposes anything that is not already shared
    "anyone with the link". */
-const KEY = process.env.GOOGLE_API_KEY || 'AIzaSyCfwHvrZJLTr30ERbiUngugaxcm1Eq4r1g';
+const KEY = process.env.GOOGLE_API_KEY || 'AIzaSyCzzco0EgdjcwW9zrZf95slLioXK2cU6Cg';
 module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   const id = String((req.query && req.query.id) || '');

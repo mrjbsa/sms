@@ -84,6 +84,7 @@ function defaultDB(){
       classFee:{}   // {cls: monthlyAmount} — set by Headmaster in Fees tab
     },
     teachers:[],   // {id,name,subject,cls,password}
+    datesheets:{}, // `${class}|${examKey}` -> {rows:[{id,date,start,end,subject,room}], note}  (exam date sheet -> admit cards)
     students:[],   // {id,name,father,cls,section,roll,mobile,marksArchive:[{year,cls,marks}]}
     attendance:{}, // key `${cls}|${date}` -> {studentId:'P'/'A'/'L'}
     teacherAttendance:{}, // key `${date}` -> {teacherId:'P'/'A'/'L'}
@@ -199,7 +200,7 @@ applyTheme(DB.config.theme);
    auto-checks for updates roughly every 25 seconds.
    ============================================================ */
 const GOOGLE_CLIENT_ID = '561937132494-v9ffcqt3ijbr44dpr5jlo0f5b61vm7s4.apps.googleusercontent.com';
-const GOOGLE_API_KEY   = 'AIzaSyCfwHvrZJLTr30ERbiUngugaxcm1Eq4r1g';
+const GOOGLE_API_KEY   = 'AIzaSyCzzco0EgdjcwW9zrZf95slLioXK2cU6Cg';
 /* A file id arriving via ?fid= in the URL (i.e. someone opened their
    school's shared link) always wins and is remembered on this device. */
 const urlFid = new URLSearchParams(location.search).get('fid');
@@ -718,7 +719,7 @@ function driveAutoSave(){
    "anyone with the link: viewer" and read with the public key. The result is remembered so the login screen can say
    plainly when the data could not be loaded, instead of silently showing an empty school. */
 let DRIVE_LOAD = {ok:null, err:''};
-const BUILD_TAG='v15';
+const BUILD_TAG='v16';
 function driveParentPull(silent){
   if(!DRIVE_FILE_ID) return Promise.resolve();
   if(!navigator.onLine){ DRIVE_LOAD={ok:false, err:'No internet connection on this device'}; if(!silent) render(); return Promise.resolve(); }
@@ -1276,8 +1277,8 @@ function renderMarksheetCard(student, marksData, yearLabel){
    already loaded and stable) and the finished result is handed to the
    print window / image renderer, so both always look identical.
    ============================================================ */
-const CARD_BASE_W = {marksheetCard:700, timetableCard:560, feeVoucherCard:560, salarySlipCard:560, certificateCard:700};
-const CARD_LABEL  = {marksheetCard:'Marksheet', timetableCard:'Timetable', feeVoucherCard:'Fee-Voucher', idCard:'ID-Card', salarySlipCard:'Salary-Slip', certificateCard:'Certificate'};
+const CARD_BASE_W = {admitCard:700, marksheetCard:700, timetableCard:560, feeVoucherCard:560, salarySlipCard:560, certificateCard:700};
+const CARD_LABEL  = {admitCard:'Admit-Card', marksheetCard:'Marksheet', timetableCard:'Timetable', feeVoucherCard:'Fee-Voucher', idCard:'ID-Card', salarySlipCard:'Salary-Slip', certificateCard:'Certificate'};
 
 /* Print / image copy of a card: no editable inputs (they cut text off), no duplicate id. */
 function staticCardHtml(el){
@@ -1493,9 +1494,9 @@ function selectRole(role){
     } else if(!hmAccountExists()){
       box.innerHTML = `<p class="text-xs text-gray-500 mb-3">First time here — create your Headmaster login.</p>
         <label class="block text-sm font-bold mb-1">School Name</label>
-        <input id="hmNewSchool" type="text" value="${esc(DB.config.schoolName==='My School'?'':DB.config.schoolName)}" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Mr JB Public School">
+        <input id="hmNewSchool" type="text" value="${esc(DB.config.schoolName==='My School'?'':DB.config.schoolName)}" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Al-Noor Public School">
         <label class="block text-sm font-bold mb-1">Your Name</label>
-        <input id="hmNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Mr JB">
+        <input id="hmNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Muhammad Bilal">
         <label class="block text-sm font-bold mb-1">Create Password</label>
         <input id="hmNewPass" type="password" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="Choose a password">
         <label class="block text-sm font-bold mb-1">Confirm Password</label>
@@ -1606,6 +1607,7 @@ const HM_TABS = [
   {key:'cloudsync', label:'Cloud Sync', icon:'☁️'},
   {key:'announcements', label:'Announcements', icon:'📣'},
   {key:'timetable', label:'Timetable', icon:'🕒'},
+  {key:'datesheet', label:'Exam Date Sheet & Admit Cards', icon:'📝'},
   {key:'teachers', label:'Teachers', icon:'👩‍🏫'},
   {key:'teacherAttendance', label:'Teacher Attendance', icon:'🗓️'},
   {key:'students', label:'Students', icon:'🎒'},
@@ -1627,6 +1629,7 @@ function renderHeadmaster(){
   if(ACTIVE_TAB==='cloudsync') content = renderCloudSyncPanel();
   if(ACTIVE_TAB==='announcements') content = hmAnnouncements();
   if(ACTIVE_TAB==='timetable') content = `<div class="space-y-5">${hmTimetable()}${teacherAllotmentCard()}</div>`;
+  if(ACTIVE_TAB==='datesheet') content = hmDateSheet();
   if(ACTIVE_TAB==='teachers') content = hmTeachers();
   if(ACTIVE_TAB==='teacherAttendance') content = hmTeacherAttendance();
   if(ACTIVE_TAB==='students') content = hmStudents();
@@ -2635,6 +2638,7 @@ const T_TABS = [
   {key:'salary', label:'My Salary', icon:'🧾'},
   {key:'announcements', label:'Announcements', icon:'📣'},
   {key:'timetable', label:'Timetable', icon:'🕒'},
+  {key:'datesheet', label:'Exam Date Sheet', icon:'📝'},
   {key:'idcard', label:'My ID Card', icon:'🪪'},
   {key:'staff', label:'Staff', icon:'👥'},
   {key:'backup', label:'Backup', icon:'💾'},
@@ -2661,6 +2665,7 @@ function renderTeacher(){
   if(ACTIVE_TAB==='salary') content = renderTeacherSalary(teacher);
   if(ACTIVE_TAB==='announcements') content = renderAnnouncements('teacher');
   if(ACTIVE_TAB==='timetable') content = `<div class="space-y-5">${teacherScheduleCard(teacher)}${DB.config.timetable ? renderTimetableCard({}) : card('<p class="text-gray-500 text-center py-10">Timetable not generated yet.</p>')}</div>`;
+  if(ACTIVE_TAB==='datesheet') content = teacherDateSheet(teacher);
   if(ACTIVE_TAB==='idcard') content = tIdCard(teacher);
   if(ACTIVE_TAB==='staff') content = renderStaffDirectory();
   if(ACTIVE_TAB==='backup') content = tBackup(teacher);
@@ -3728,6 +3733,7 @@ const P_TABS = [
   {key:'homework', label:'Homework', icon:'📚'},
   {key:'announcements', label:'Announcements', icon:'📣'},
   {key:'timetable', label:'Timetable', icon:'🕒'},
+  {key:'admit', label:'Admit Card', icon:'🎫'},
   {key:'idcard', label:'ID Card', icon:'🪪'},
   {key:'certificates', label:'Certificates', icon:'📜'},
   {key:'staff', label:'Staff', icon:'👥'},
@@ -3748,6 +3754,7 @@ function renderParent(){
   if(ACTIVE_TAB==='homework') content = card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-4">📚 Homework — Class ${esc(stu.cls)}</h2><div class="space-y-3">${renderHomeworkList(stu.cls)}</div>`);
   if(ACTIVE_TAB==='announcements') content = renderAnnouncements('parent');
   if(ACTIVE_TAB==='timetable') content = `<div class="space-y-5">${classTeachersCard(stu.cls)}${DB.config.timetable ? renderTimetableCard({}) : card('<p class="text-gray-500 text-center py-10">Timetable not generated yet.</p>')}</div>`;
+  if(ACTIVE_TAB==='admit') content = parentAdmit(stu);
   if(ACTIVE_TAB==='idcard') content = pIdCard(stu);
   if(ACTIVE_TAB==='certificates') content = renderParentCertificates(stu);
   if(ACTIVE_TAB==='staff') content = renderStaffDirectory();
@@ -4019,7 +4026,7 @@ function ownerLoginFields(){
   if(!ownerAccountExists()){
     return `<p class="text-xs text-gray-500 mb-3">First time here — create the School Owner login. The Owner's Gmail will hold this school's Google Drive data.</p>
       <label class="block text-sm font-bold mb-1">Owner Name</label>
-      <input id="owNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Mr JB ">
+      <input id="owNewName" type="text" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="e.g. Haji Abdul Rehman">
       <label class="block text-sm font-bold mb-1">Create Password</label>
       <input id="owNewPass" type="password" class="w-full border rounded-lg px-3 py-2 mb-3" placeholder="Choose a password">
       <label class="block text-sm font-bold mb-1">Confirm Password</label>
@@ -4356,6 +4363,159 @@ function openSchoolReport(){
     *{-webkit-print-color-adjust:exact;print-color-adjust:exact}@media print{.bar{display:none}}
   </style></head><body><div class="bar"><span>Choose <b>Save as PDF</b> as destination, then Save. File name: ${fname}.pdf</span><button onclick="window.print()">⬇️ Save as PDF</button></div>${html}</body></html>`);
   w.document.close();
+}
+
+
+/* ============================================================
+   EXAM DATE SHEET + ADMIT CARD (roll-number slip / gate pass)
+   Headmaster sets, per class and exam (PT-1 / PT-2 / Mid / Final): subject, date, time, room.
+   Every student gets an Admit Card with his/her details + that date sheet; parents print their own,
+   teachers see the date sheet of their classes. Data: DB.datesheets[`${cls}|${exam}`].
+   ============================================================ */
+function dsKey(cls,exam){ return cls+'|'+exam; }
+function dsGet(cls,exam){ return (DB.datesheets||{})[dsKey(cls,exam)] || null; }
+function dsRows(cls,exam){ const d=dsGet(cls,exam); return d&&d.rows ? d.rows.slice().sort((a,b)=>(a.date||'').localeCompare(b.date||'')||(a.start||'').localeCompare(b.start||'')) : []; }
+function dsEnsure(cls,exam){ if(!DB.datesheets) DB.datesheets={}; const k=dsKey(cls,exam); if(!DB.datesheets[k]) DB.datesheets[k]={rows:[],note:''}; return DB.datesheets[k]; }
+function dsDay(date){ if(!date) return ''; const d=new Date(date+'T00:00:00'); return isNaN(d)?'':d.toLocaleDateString('en-GB',{weekday:'long'}); }
+function dsDate(date){ if(!date) return '—'; const d=new Date(date+'T00:00:00'); return isNaN(d)?esc(date):d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}); }
+function dsTime(r){ const f=t=>t?minToTime(timeToMin(t)):''; return r.start? (f(r.start)+(r.end?' – '+f(r.end):'')) : '—'; }
+function examLabel(k){ const e=EXAMS.find(x=>x.key===k); return e?e.label:k; }
+function dsClassesWithSheet(exam){ return (DB.config.classes||[]).filter(c=>dsRows(c,exam).length); }
+function dsAddRow(cls,exam){ const d=dsEnsure(cls,exam); d.rows.push({id:uid(),date:'',start:'09:00',end:'11:00',subject:subjectsForClass(cls)[0]||'',room:''}); saveDB(); render(); }
+function dsFillSubjects(cls,exam){
+  const d=dsEnsure(cls,exam); const have=new Set(d.rows.map(r=>r.subject)); let n=0;
+  subjectsForClass(cls).forEach(sub=>{ if(!have.has(sub)){ d.rows.push({id:uid(),date:'',start:'09:00',end:'11:00',subject:sub,room:''}); n++; } });
+  if(!n){ alert('All subjects are already in the date sheet.'); return; } saveDB(); render();
+}
+function dsSet(cls,exam,id,field,val){ const d=dsEnsure(cls,exam); const r=d.rows.find(x=>x.id===id); if(!r) return; r[field]=val; saveDB(); render(); }
+function dsDel(cls,exam,id){ const d=dsEnsure(cls,exam); d.rows=d.rows.filter(x=>x.id!==id); saveDB(); render(); }
+function dsNote(cls,exam,val){ dsEnsure(cls,exam).note=val; saveDB(); }
+function dsClash(cls,exam){
+  const rows=dsRows(cls,exam).filter(r=>r.date&&r.start); const out=[];
+  for(let i=0;i<rows.length;i++) for(let j=i+1;j<rows.length;j++){
+    const a=rows[i], b=rows[j]; if(a.date!==b.date) continue;
+    const a1=timeToMin(a.start), a2=a.end?timeToMin(a.end):a1+1, b1=timeToMin(b.start), b2=b.end?timeToMin(b.end):b1+1;
+    if(a1<b2 && b1<a2) out.push(`${dsDate(a.date)}: ${a.subject} and ${b.subject} overlap`);
+  }
+  return out;
+}
+function dsCopyTo(cls,exam){
+  const src=dsGet(cls,exam); if(!src||!src.rows.length){ alert('Nothing to copy yet.'); return; }
+  const others=(DB.config.classes||[]).filter(c=>c!==cls); if(!others.length) return;
+  const pick=prompt('Copy this date sheet to which classes?\nType class names separated by commas, or ALL.\n\nAvailable: '+others.join(', ')); if(!pick) return;
+  const targets = pick.trim().toUpperCase()==='ALL' ? others : pick.split(',').map(x=>x.trim()).filter(x=>others.includes(x));
+  if(!targets.length){ alert('No matching class names.'); return; }
+  targets.forEach(t=>{ const subs=subjectsForClass(t); const d=dsEnsure(t,exam); d.rows=src.rows.map(r=>({id:uid(),date:r.date,start:r.start,end:r.end,room:r.room||'',subject:subs.includes(r.subject)?r.subject:r.subject})); d.note=src.note||''; });
+  saveDB(); alert('Copied to: '+targets.join(', ')+'.\nSubjects that a class does not have can be deleted there.'); render();
+}
+function renderAdmitCard(stu, exam, idAttr){
+  const cfg=DB.config, rows=dsRows(stu.cls,exam), d=dsGet(stu.cls,exam), idA = idAttr===null ? '' : `id="${idAttr||'admitCard'}"`;
+  const photo = stu.photo ? `<img src="${stu.photo}" style="width:100%;height:100%;object-fit:cover;">` : `<span style="font-size:28px;">👤</span>`;
+  const info=(l,v)=>`<div style="padding:2px 0;"><span style="color:#666;">${l}:</span> <b>${esc(v||'—')}</b></div>`;
+  return `<div ${idA} class="admit-card" style="border:2px solid var(--navy);border-radius:10px;overflow:hidden;background:#fff;font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#111;max-width:700px;margin:0 auto;">
+    <div style="background:var(--navy);color:#fff;padding:10px 14px;display:flex;align-items:center;gap:12px;">
+      <div style="width:46px;height:46px;border-radius:8px;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;font-size:26px;flex:none;">${cfg.logo?`<img src="${cfg.logo}" style="width:100%;height:100%;object-fit:cover;">`:'🎓'}</div>
+      <div style="flex:1;text-align:center;"><div style="font-size:18px;font-weight:800;letter-spacing:.5px;">${esc(cfg.schoolName)}</div>
+      <div style="color:var(--gold);font-weight:700;letter-spacing:2px;font-size:12px;">ADMIT CARD · ROLL NUMBER SLIP</div></div>
+      <div style="width:46px;flex:none;"></div>
+    </div>
+    <div style="padding:8px 14px;background:#f6f7fb;border-bottom:1px solid #ddd;text-align:center;font-weight:700;color:var(--navy);">${esc(examLabel(exam))} Examination · Session ${esc(cfg.year||'')}</div>
+    <div style="display:flex;gap:14px;padding:10px 14px;align-items:flex-start;">
+      <div style="width:70px;height:84px;border:1.5px solid var(--navy);border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#eef1f8;flex:none;">${photo}</div>
+      <div style="flex:1;display:grid;grid-template-columns:1fr 1fr;column-gap:14px;">
+        ${info('Student Name',stu.name)}${info('Roll No.',stu.roll)}
+        ${info("Father's Name",stu.father)}${info('Class',stu.cls)}
+        ${info('Section',stu.section)}${info('Gender',stu.gender)}
+        ${info('Parent Mobile',stu.mobile)}${info('Admission',stu.admissionDate)}
+      </div>
+    </div>
+    <div style="padding:0 14px 8px;">
+      <table style="width:100%;border-collapse:collapse;">
+        <thead><tr style="background:var(--navy);color:#fff;"><th style="padding:5px 6px;text-align:left;">#</th><th style="text-align:left;">Date</th><th style="text-align:left;">Day</th><th style="text-align:left;">Subject</th><th style="text-align:left;">Time</th><th style="text-align:left;">Room</th></tr></thead>
+        <tbody>${rows.map((r,i)=>`<tr style="border-bottom:1px solid #ddd;"><td style="padding:4px 6px;">${i+1}</td><td>${dsDate(r.date)}</td><td>${esc(dsDay(r.date))}</td><td><b>${esc(r.subject)}</b></td><td>${esc(dsTime(r))}</td><td>${esc(r.room||'')}</td></tr>`).join('')||'<tr><td colspan="6" style="padding:8px;text-align:center;color:#999;">Date sheet not published yet.</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div style="padding:0 14px 6px;font-size:11px;color:#444;"><b>Instructions:</b> Bring this card to every paper · Reach 15 minutes early · No mobile phones or unfair means.${d&&d.note?'<br><b>Note:</b> '+esc(d.note):''}</div>
+    <div style="display:flex;justify-content:space-between;padding:14px 18px 10px;font-size:11px;">
+      <div style="border-top:1px solid #333;padding-top:3px;width:30%;text-align:center;">Class Teacher</div>
+      <div style="border-top:1px solid #333;padding-top:3px;width:30%;text-align:center;">Headmaster${DB.config.headmasterAccount&&DB.config.headmasterAccount.name?' — '+esc(DB.config.headmasterAccount.name):''}</div>
+    </div>
+  </div>`;
+}
+function dsSheetTable(cls,exam,editable){
+  const rows=dsRows(cls,exam);
+  if(!editable) return `<div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Date</th><th>Day</th><th>Subject</th><th>Time</th><th>Room</th></tr></thead><tbody>${rows.map(r=>`<tr class="border-b"><td class="py-2">${dsDate(r.date)}</td><td>${esc(dsDay(r.date))}</td><td class="font-bold">${esc(r.subject)}</td><td>${esc(dsTime(r))}</td><td>${esc(r.room||'')}</td></tr>`).join('')||'<tr><td colspan="5" class="py-3 text-gray-500">No papers scheduled yet.</td></tr>'}</tbody></table></div>`;
+  const q=v=>String(v).replace(/'/g,"\\'");
+  const subs=subjectsForClass(cls);
+  return `<div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-left border-b"><th class="py-2">Subject</th><th>Date</th><th>Start</th><th>End</th><th>Room</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr class="border-b">
+    <td class="py-1"><select onchange="dsSet('${q(cls)}','${exam}','${r.id}','subject',this.value)" class="border rounded-lg px-2 py-1">${(subs.includes(r.subject)?subs:subs.concat([r.subject])).map(x=>`<option ${x===r.subject?'selected':''}>${esc(x)}</option>`).join('')}</select></td>
+    <td><input type="date" value="${esc(r.date)}" onchange="dsSet('${q(cls)}','${exam}','${r.id}','date',this.value)" class="border rounded-lg px-2 py-1"></td>
+    <td><input type="time" value="${esc(r.start)}" onchange="dsSet('${q(cls)}','${exam}','${r.id}','start',this.value)" class="border rounded-lg px-2 py-1"></td>
+    <td><input type="time" value="${esc(r.end)}" onchange="dsSet('${q(cls)}','${exam}','${r.id}','end',this.value)" class="border rounded-lg px-2 py-1"></td>
+    <td><input value="${esc(r.room||'')}" placeholder="Room / Hall" onchange="dsSet('${q(cls)}','${exam}','${r.id}','room',this.value)" class="border rounded-lg px-2 py-1 w-28"></td>
+    <td><button onclick="dsDel('${q(cls)}','${exam}','${r.id}')" class="text-red-600 font-bold">🗑️</button></td></tr>`).join('')||'<tr><td colspan="6" class="py-3 text-gray-500">No papers yet — press “Fill all subjects” or “Add paper”.</td></tr>'}</tbody></table></div>`;
+}
+function hmDateSheet(){
+  const classes=DB.config.classes||[]; if(!classes.length) return card('<p class="text-gray-500">Add classes in School Setup first.</p>');
+  const cls=(document.getElementById('dsClass')||{}).value||classes[0];
+  const exam=(document.getElementById('dsExam')||{}).value||EXAMS[0].key;
+  const studs=DB.students.filter(s=>s.cls===cls).sort((a,b)=>(Number(a.roll)||0)-(Number(b.roll)||0));
+  const sid=(document.getElementById('dsStudent')||{}).value;
+  const stu=studs.find(s=>s.id===sid)||studs[0];
+  const clash=dsClash(cls,exam), d=dsGet(cls,exam), q=v=>String(v).replace(/'/g,"\\'");
+  return `<div class="space-y-5">
+    ${card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-3">📝 Exam Date Sheet</h2>
+      <div class="flex flex-wrap gap-3 items-end mb-3">
+        <div><label class="block text-xs font-bold mb-1">Class</label><select id="dsClass" onchange="render()" class="border rounded-lg px-3 py-2">${classes.map(c=>`<option ${c===cls?'selected':''}>${esc(c)}</option>`).join('')}</select></div>
+        <div><label class="block text-xs font-bold mb-1">Exam</label><select id="dsExam" onchange="render()" class="border rounded-lg px-3 py-2">${EXAMS.map(e=>`<option value="${e.key}" ${e.key===exam?'selected':''}>${esc(e.label)}</option>`).join('')}</select></div>
+        <button onclick="dsFillSubjects('${q(cls)}','${exam}')" class="navy-btn rounded-lg px-4 py-2 font-bold">📚 Fill all subjects</button>
+        <button onclick="dsAddRow('${q(cls)}','${exam}')" class="gold-btn rounded-lg px-4 py-2 font-bold">➕ Add paper</button>
+        <button onclick="dsCopyTo('${q(cls)}','${exam}')" class="bg-gray-200 rounded-lg px-4 py-2 font-bold">📋 Copy to other classes</button>
+      </div>
+      ${clash.length?`<div class="text-sm bg-amber-50 border border-amber-300 text-amber-800 rounded-lg px-3 py-2 mb-3">⚠️ ${clash.map(esc).join('<br>⚠️ ')}</div>`:''}
+      ${dsSheetTable(cls,exam,true)}
+      <div class="mt-3"><label class="block text-xs font-bold mb-1">Note on the admit card (optional)</label><input value="${esc(d?d.note||'':'')}" onchange="dsNote('${q(cls)}','${exam}',this.value)" placeholder="e.g. Bring your own geometry box" class="w-full border rounded-lg px-3 py-2"></div>
+      <p class="text-xs text-gray-500 mt-2">Everything saves automatically. Parents see the Admit Card in their login as soon as papers are added.</p>`)}
+    ${card(`<div class="flex flex-wrap items-end gap-3 mb-3"><h2 class="text-xl font-bold text-[var(--navy)]">🎫 Admit Cards — ${esc(cls)} · ${esc(examLabel(exam))}</h2>
+      <select id="dsStudent" onchange="render()" class="border rounded-lg px-3 py-2">${studs.map(s=>`<option value="${s.id}" ${stu&&s.id===stu.id?'selected':''}>${esc(s.roll)} — ${esc(s.name)}</option>`).join('')||'<option>No students</option>'}</select>
+      ${stu?`<button onclick="printEl('admitCard')" class="gold-btn rounded-lg px-4 py-2 font-bold">🖨️ Print this card</button><button onclick="jpgEl('admitCard')" class="rounded-lg px-4 py-2 font-bold" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button>`:''}
+      ${studs.length?`<button onclick="printClassAdmitCards('${q(cls)}','${exam}')" class="bg-green-700 text-white rounded-lg px-4 py-2 font-bold">🖨️ Print whole class (PDF)</button>`:''}</div>
+      ${stu?renderAdmitCard(stu,exam):'<p class="text-gray-500 text-sm">No students in this class.</p>'}`)}
+  </div>`;
+}
+function printClassAdmitCards(cls,exam){
+  const studs=DB.students.filter(s=>s.cls===cls).sort((a,b)=>(Number(a.roll)||0)-(Number(b.roll)||0));
+  if(!studs.length){ alert('No students in this class.'); return; }
+  if(!dsRows(cls,exam).length && !confirm('No papers are added for this class/exam yet. Print the cards anyway?')) return;
+  const w=window.open('','AdmitCards','width=900,height=1000'); if(!w){ alert('Please allow pop-ups for this site to print.'); return; }
+  const fname=('Admit-Cards-'+cls+'-'+examLabel(exam)+'-'+todayISO()).replace(/[^\w\-]+/g,'_');
+  w.document.open();
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${fname}</title><style>${collectPageCss()}</style><style>
+    @page{size:A4;margin:8mm} html,body{margin:0;background:#fff} *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+    .bar{position:sticky;top:0;z-index:9;background:var(--navy);color:#fff;padding:10px 16px;display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap;font-family:Arial,sans-serif}
+    .bar button{background:var(--gold);border:0;border-radius:8px;padding:8px 18px;font-weight:700;cursor:pointer}
+    .admit-card{break-inside:avoid;page-break-inside:avoid;margin-bottom:6mm !important} .wrap{padding:10px}
+    @media print{.bar{display:none}.wrap{padding:0}}
+  </style></head><body><div class="bar"><span>${studs.length} admit cards · choose <b>Save as PDF</b> as destination.</span><button onclick="window.print()">⬇️ Save / Print</button></div>
+  <div class="wrap">${studs.map(s=>renderAdmitCard(s,exam,null)).join('')}</div></body></html>`);
+  w.document.close();
+}
+function teacherDateSheet(teacher){
+  const classes=teacherClasses(teacher);
+  if(!classes.length) return noAssignCard(teacher,'the exam date sheet');
+  const exam=(document.getElementById('tdsExam')||{}).value||EXAMS[0].key;
+  return `<div class="space-y-5">${card(`<div class="flex flex-wrap items-center gap-3"><h2 class="text-xl font-bold text-[var(--navy)]">📝 Exam Date Sheet</h2><select id="tdsExam" onchange="render()" class="border rounded-lg px-3 py-2">${EXAMS.map(e=>`<option value="${e.key}" ${e.key===exam?'selected':''}>${esc(e.label)}</option>`).join('')}</select></div>`)}
+    ${classes.map(c=>card(`<h3 class="font-bold text-[var(--navy)] mb-2">Class ${esc(c)} — ${esc(examLabel(exam))}</h3>${dsSheetTable(c,exam,false)}`)).join('')}</div>`;
+}
+function parentAdmit(stu){
+  const exams=EXAMS.filter(e=>dsRows(stu.cls,e.key).length);
+  if(!exams.length) return card(`<h2 class="text-xl font-bold text-[var(--navy)] mb-2">🎫 Admit Card</h2><p class="text-gray-500 text-center py-8">The exam date sheet has not been published yet. Your child's Admit Card will appear here as soon as the school adds it.</p>`);
+  const sel=(document.getElementById('admitExam')||{}).value; const exam=exams.find(e=>e.key===sel)?sel:exams[0].key;
+  return `<div class="space-y-4">${card(`<div class="flex flex-wrap items-center gap-3"><h2 class="text-xl font-bold text-[var(--navy)]">🎫 Admit Card — ${esc(stu.name)}</h2>
+      <select id="admitExam" onchange="render()" class="border rounded-lg px-3 py-2">${exams.map(e=>`<option value="${e.key}" ${e.key===exam?'selected':''}>${esc(e.label)}</option>`).join('')}</select>
+      <button onclick="printEl('admitCard')" class="gold-btn rounded-lg px-4 py-2 font-bold">🖨️ Print</button>
+      <button onclick="jpgEl('admitCard')" class="rounded-lg px-4 py-2 font-bold" style="background:var(--navy);color:#fff;">🖼️ Save JPG</button></div>`)}
+    ${renderAdmitCard(stu,exam)}</div>`;
 }
 
 function render(){
